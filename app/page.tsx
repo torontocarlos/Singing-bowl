@@ -36,6 +36,20 @@ const PARTIALS = [
   { ratio: 13.34, beat: 3.6, gain: 0.09, decay: 1.4 }
 ];
 
+type Mode = 'zen' | 'psychedelic' | 'techno';
+
+const MODES: { id: Mode; label: string; short: string }[] = [
+  { id: 'zen', label: 'Zen', short: 'Z' },
+  { id: 'psychedelic', label: 'Psychedelic', short: 'P' },
+  { id: 'techno', label: 'Techno', short: 'T' }
+];
+
+const MODE_AUDIO: Record<Mode, { vibratoRate: number; vibratoDepth: number }> = {
+  zen: { vibratoRate: 5.2, vibratoDepth: 2.4 },
+  psychedelic: { vibratoRate: 3.6, vibratoDepth: 5.5 },
+  techno: { vibratoRate: 7.4, vibratoDepth: 1.0 }
+};
+
 class BowlEngine {
   ctx: AudioContext;
   master: GainNode;
@@ -111,6 +125,14 @@ class BowlEngine {
     this.dry.gain.cancelScheduledValues(now);
     this.wet.gain.linearRampToValueAtTime(v, now + 0.08);
     this.dry.gain.linearRampToValueAtTime(0.4 + (1 - v) * 0.45, now + 0.08);
+  }
+
+  setVibrato(rate: number, depth: number) {
+    const now = this.ctx.currentTime;
+    this.vibrato.frequency.cancelScheduledValues(now);
+    this.vibratoGain.gain.cancelScheduledValues(now);
+    this.vibrato.frequency.linearRampToValueAtTime(rate, now + 0.4);
+    this.vibratoGain.gain.linearRampToValueAtTime(depth, now + 0.4);
   }
 
   strike(freq: number, energy: number) {
@@ -216,6 +238,424 @@ type Spark = {
   maxLife: number;
 };
 
+type Scene = {
+  cx: number;
+  cy: number;
+  radius: number;
+  innerRim: number;
+  outerRim: number;
+  pointerActive: boolean;
+  lastAngle: number;
+  lastTime: number;
+  singing: boolean;
+  sustainTarget: number;
+  sustainCurrent: number;
+  strikePulse: number;
+  rimHighlight: number;
+  rimAngle: number;
+  timeAcc: number;
+  hue: number;
+  glow: [number, number, number];
+  mode: Mode;
+};
+
+function drawZen(
+  ctx: CanvasRenderingContext2D,
+  s: Scene,
+  w: number,
+  h: number,
+  dt: number,
+  sparks: Spark[]
+) {
+  const [gr, gg, gb] = s.glow;
+  const liveGlow = 0.25 + s.sustainCurrent * 0.55 + s.strikePulse * 0.6;
+
+  const back = ctx.createRadialGradient(s.cx, s.cy, 0, s.cx, s.cy, Math.max(w, h) * 0.7);
+  back.addColorStop(0, `rgba(${gr}, ${gg}, ${gb}, ${0.08 + liveGlow * 0.18})`);
+  back.addColorStop(0.45, `rgba(${gr}, ${gg}, ${gb}, ${0.02 + liveGlow * 0.05})`);
+  back.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = back;
+  ctx.fillRect(0, 0, w, h);
+
+  const r = s.radius;
+  const pulse = r * (1 + s.strikePulse * 0.035 + s.sustainCurrent * 0.012);
+
+  const halo = ctx.createRadialGradient(s.cx, s.cy, r * 0.6, s.cx, s.cy, r * 1.8);
+  halo.addColorStop(0, `rgba(${gr}, ${gg}, ${gb}, ${0.18 + liveGlow * 0.35})`);
+  halo.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = halo;
+  ctx.beginPath();
+  ctx.arc(s.cx, s.cy, r * 1.8, 0, Math.PI * 2);
+  ctx.fill();
+
+  const body = ctx.createRadialGradient(
+    s.cx - r * 0.25,
+    s.cy - r * 0.3,
+    r * 0.1,
+    s.cx,
+    s.cy,
+    pulse
+  );
+  body.addColorStop(0, `hsl(${s.hue}, 35%, 22%)`);
+  body.addColorStop(0.6, `hsl(${s.hue}, 40%, 12%)`);
+  body.addColorStop(1, `hsl(${s.hue}, 50%, 6%)`);
+  ctx.fillStyle = body;
+  ctx.beginPath();
+  ctx.arc(s.cx, s.cy, pulse, 0, Math.PI * 2);
+  ctx.fill();
+
+  const well = ctx.createRadialGradient(
+    s.cx + r * 0.15,
+    s.cy + r * 0.2,
+    r * 0.05,
+    s.cx,
+    s.cy,
+    r * 0.78
+  );
+  well.addColorStop(0, `hsl(${s.hue}, 45%, 16%)`);
+  well.addColorStop(0.7, 'rgba(8, 9, 14, 0.92)');
+  well.addColorStop(1, 'rgba(4, 5, 9, 1)');
+  ctx.fillStyle = well;
+  ctx.beginPath();
+  ctx.arc(s.cx, s.cy, r * 0.78, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.lineWidth = r * 0.07;
+  const rimGrad = ctx.createLinearGradient(s.cx - r, s.cy - r, s.cx + r, s.cy + r);
+  rimGrad.addColorStop(0, `hsla(${s.hue}, 55%, 60%, 0.65)`);
+  rimGrad.addColorStop(0.5, `hsla(${s.hue}, 75%, 78%, 0.95)`);
+  rimGrad.addColorStop(1, `hsla(${s.hue}, 55%, 45%, 0.65)`);
+  ctx.strokeStyle = rimGrad;
+  ctx.beginPath();
+  ctx.arc(s.cx, s.cy, r * 0.88, 0, Math.PI * 2);
+  ctx.stroke();
+
+  if (s.rimHighlight > 0.001 || s.sustainCurrent > 0.001) {
+    ctx.save();
+    ctx.lineWidth = r * 0.04;
+    ctx.strokeStyle = `rgba(${gr}, ${gg}, ${gb}, ${Math.min(1, s.rimHighlight + s.sustainCurrent * 0.7)})`;
+    ctx.shadowColor = `rgba(${gr}, ${gg}, ${gb}, 0.9)`;
+    ctx.shadowBlur = 22 + s.sustainCurrent * 40;
+    ctx.beginPath();
+    ctx.arc(s.cx, s.cy, r * 0.88, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  if (s.strikePulse > 0) {
+    ctx.save();
+    const t = 1 - s.strikePulse;
+    ctx.strokeStyle = `rgba(${gr}, ${gg}, ${gb}, ${s.strikePulse * 0.45})`;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(s.cx, s.cy, r * 0.35 + r * 0.45 * t, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(s.cx, s.cy, r * 0.18 + r * 0.5 * t, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  const spawn = Math.floor(s.sustainCurrent * 4 + s.strikePulse * 6);
+  for (let i = 0; i < spawn; i++) {
+    sparks.push({
+      angle: s.rimAngle + (Math.random() - 0.5) * 0.6,
+      speed: 0.4 + Math.random() * 1.2,
+      radius: r * 0.88 + (Math.random() - 0.5) * r * 0.06,
+      life: 0,
+      maxLife: 0.9 + Math.random() * 1.2
+    });
+  }
+
+  for (let i = sparks.length - 1; i >= 0; i--) {
+    const sp = sparks[i];
+    sp.life += dt;
+    sp.angle += sp.speed * dt;
+    sp.radius += dt * r * 0.08;
+    if (sp.life >= sp.maxLife) {
+      sparks.splice(i, 1);
+      continue;
+    }
+    const a = 1 - sp.life / sp.maxLife;
+    const x = s.cx + Math.cos(sp.angle) * sp.radius;
+    const y = s.cy + Math.sin(sp.angle) * sp.radius;
+    ctx.fillStyle = `rgba(${gr}, ${gg}, ${gb}, ${a * 0.9})`;
+    ctx.beginPath();
+    ctx.arc(x, y, 1.6 + a * 1.4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  if (sparks.length > 400) sparks.splice(0, sparks.length - 400);
+
+  ctx.fillStyle = `rgba(${gr}, ${gg}, ${gb}, ${0.18 + s.strikePulse * 0.6})`;
+  ctx.beginPath();
+  ctx.arc(s.cx, s.cy, r * 0.05, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawPsychedelic(
+  ctx: CanvasRenderingContext2D,
+  s: Scene,
+  w: number,
+  h: number,
+  dt: number,
+  sparks: Spark[]
+) {
+  const r = s.radius;
+  const t = s.timeAcc;
+  const live = 0.3 + s.sustainCurrent * 0.65 + s.strikePulse * 0.8;
+
+  const back = ctx.createRadialGradient(s.cx, s.cy, 0, s.cx, s.cy, Math.max(w, h) * 0.9);
+  for (let i = 0; i <= 5; i++) {
+    const hue = (s.hue + i * 60 + t * 35) % 360;
+    back.addColorStop(i / 5, `hsla(${hue}, 80%, 50%, ${0.05 + live * 0.07})`);
+  }
+  ctx.fillStyle = back;
+  ctx.fillRect(0, 0, w, h);
+
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  for (let i = 6; i > 0; i--) {
+    const hue = (s.hue + t * 70 + i * 50) % 360;
+    const ringR = r * (1.0 + i * 0.18);
+    ctx.fillStyle = `hsla(${hue}, 85%, 55%, ${0.04 + live * 0.05})`;
+    ctx.beginPath();
+    ctx.arc(s.cx, s.cy, ringR, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+
+  ctx.save();
+  ctx.translate(s.cx, s.cy);
+  ctx.rotate(t * 0.45);
+  ctx.globalCompositeOperation = 'lighter';
+  const petals = 14;
+  for (let i = 0; i < petals; i++) {
+    const a = (i / petals) * Math.PI * 2;
+    const hue = (s.hue + i * (360 / petals) + t * 90) % 360;
+    const grad = ctx.createRadialGradient(0, 0, r * 0.08, 0, 0, r * 1.05);
+    grad.addColorStop(0, `hsla(${hue}, 90%, 60%, 0.22)`);
+    grad.addColorStop(1, `hsla(${hue}, 80%, 30%, 0)`);
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.arc(0, 0, r * 1.05, a - Math.PI / petals, a + Math.PI / petals);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+
+  const wellHue = (s.hue + t * 110) % 360;
+  const well = ctx.createRadialGradient(s.cx, s.cy, 0, s.cx, s.cy, r * 0.78);
+  well.addColorStop(0, `hsla(${wellHue}, 70%, 16%, 0.92)`);
+  well.addColorStop(0.6, `hsla(${(wellHue + 70) % 360}, 70%, 8%, 0.95)`);
+  well.addColorStop(1, 'rgba(0,0,0,1)');
+  ctx.fillStyle = well;
+  ctx.beginPath();
+  ctx.arc(s.cx, s.cy, r * 0.78, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.lineWidth = r * 0.05;
+  const arcs = 9;
+  for (let i = 0; i < arcs; i++) {
+    const a0 = (i / arcs) * Math.PI * 2 + t * 0.55;
+    const a1 = a0 + Math.PI * 0.22;
+    const hue = (s.hue + i * 40 + t * 140) % 360;
+    ctx.strokeStyle = `hsla(${hue}, 95%, 65%, ${0.7 + live * 0.3})`;
+    ctx.shadowColor = `hsla(${hue}, 95%, 65%, 0.95)`;
+    ctx.shadowBlur = 18 + s.sustainCurrent * 30;
+    ctx.beginPath();
+    ctx.arc(s.cx, s.cy, r * 0.88, a0, a1);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  if (s.strikePulse > 0) {
+    const tt = 1 - s.strikePulse;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < 5; i++) {
+      const hue = (s.hue + i * 72 + t * 220) % 360;
+      ctx.strokeStyle = `hsla(${hue}, 95%, 60%, ${s.strikePulse * 0.55})`;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.arc(s.cx, s.cy, r * (0.1 + 0.15 * i) + r * 0.6 * tt, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  const spawn = Math.floor(s.sustainCurrent * 7 + s.strikePulse * 12);
+  for (let i = 0; i < spawn; i++) {
+    sparks.push({
+      angle: Math.random() * Math.PI * 2,
+      speed: -1.4 + Math.random() * 2.8,
+      radius: r * 0.88 + (Math.random() - 0.5) * r * 0.12,
+      life: 0,
+      maxLife: 1.2 + Math.random() * 1.6
+    });
+  }
+
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  for (let i = sparks.length - 1; i >= 0; i--) {
+    const sp = sparks[i];
+    sp.life += dt;
+    sp.angle += sp.speed * dt;
+    sp.radius += dt * r * 0.05 * (sp.speed >= 0 ? 1 : -1);
+    if (sp.life >= sp.maxLife || sp.radius < r * 0.2 || sp.radius > r * 1.6) {
+      sparks.splice(i, 1);
+      continue;
+    }
+    const a = 1 - sp.life / sp.maxLife;
+    const x = s.cx + Math.cos(sp.angle) * sp.radius;
+    const y = s.cy + Math.sin(sp.angle) * sp.radius;
+    const hue = (s.hue + sp.angle * 70 + t * 220) % 360;
+    ctx.fillStyle = `hsla(${hue}, 95%, 70%, ${a * 0.95})`;
+    ctx.beginPath();
+    ctx.arc(x, y, 1.6 + a * 2.4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+  if (sparks.length > 500) sparks.splice(0, sparks.length - 500);
+
+  ctx.fillStyle = `hsla(${(s.hue + t * 220) % 360}, 95%, 72%, ${0.3 + s.strikePulse * 0.7})`;
+  ctx.beginPath();
+  ctx.arc(s.cx, s.cy, r * 0.06, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawTechno(
+  ctx: CanvasRenderingContext2D,
+  s: Scene,
+  w: number,
+  h: number,
+  dt: number,
+  sparks: Spark[]
+) {
+  const r = s.radius;
+  const [gr, gg, gb] = s.glow;
+  const t = s.timeAcc;
+  const live = 0.2 + s.sustainCurrent * 0.7 + s.strikePulse * 0.85;
+
+  ctx.fillStyle = 'rgba(4, 6, 10, 0.9)';
+  ctx.fillRect(0, 0, w, h);
+
+  ctx.save();
+  ctx.strokeStyle = `rgba(${gr}, ${gg}, ${gb}, ${0.06 + live * 0.06})`;
+  ctx.lineWidth = 1;
+  const grid = 36;
+  const ox = s.cx % grid;
+  const oy = s.cy % grid;
+  ctx.beginPath();
+  for (let x = ox; x < w; x += grid) {
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, h);
+  }
+  for (let y = oy; y < h; y += grid) {
+    ctx.moveTo(0, y);
+    ctx.lineTo(w, y);
+  }
+  ctx.stroke();
+  ctx.restore();
+
+  ctx.strokeStyle = `rgba(${gr}, ${gg}, ${gb}, ${0.1 + live * 0.12})`;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(s.cx - r * 1.5, s.cy);
+  ctx.lineTo(s.cx + r * 1.5, s.cy);
+  ctx.moveTo(s.cx, s.cy - r * 1.5);
+  ctx.lineTo(s.cx, s.cy + r * 1.5);
+  ctx.stroke();
+
+  const haloGrad = ctx.createRadialGradient(s.cx, s.cy, r * 0.7, s.cx, s.cy, r * 1.7);
+  haloGrad.addColorStop(0, `rgba(${gr}, ${gg}, ${gb}, ${0.18 + live * 0.4})`);
+  haloGrad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = haloGrad;
+  ctx.beginPath();
+  ctx.arc(s.cx, s.cy, r * 1.7, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = `hsl(${s.hue}, 28%, 6%)`;
+  ctx.beginPath();
+  ctx.arc(s.cx, s.cy, r, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = 'rgba(2, 4, 8, 1)';
+  ctx.beginPath();
+  ctx.arc(s.cx, s.cy, r * 0.78, 0, Math.PI * 2);
+  ctx.fill();
+
+  const segments = 32;
+  const segWidth = (Math.PI * 2) / segments;
+  for (let i = 0; i < segments; i++) {
+    const a = i * segWidth + s.rimAngle * 0.6;
+    const phase = (i / segments + t * 0.35) % 1;
+    const wave = Math.max(0, Math.sin(phase * Math.PI * 2));
+    const intensity = 0.18 + wave * (0.35 + s.sustainCurrent + s.strikePulse);
+    ctx.strokeStyle = `rgba(${gr}, ${gg}, ${gb}, ${Math.min(1, intensity)})`;
+    ctx.lineWidth = r * 0.07;
+    ctx.beginPath();
+    ctx.arc(s.cx, s.cy, r * 0.88, a, a + segWidth * 0.7);
+    ctx.stroke();
+  }
+
+  ctx.save();
+  ctx.strokeStyle = `rgba(${gr}, ${gg}, ${gb}, 0.9)`;
+  ctx.lineWidth = 1.4;
+  ctx.shadowColor = `rgba(${gr}, ${gg}, ${gb}, 1)`;
+  ctx.shadowBlur = 12 + s.sustainCurrent * 28;
+  ctx.beginPath();
+  ctx.arc(s.cx, s.cy, r * 0.88, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(s.cx, s.cy, r * 0.78, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+
+  if (s.strikePulse > 0) {
+    const tt = 1 - s.strikePulse;
+    for (let i = 0; i < 3; i++) {
+      const sz = r * (0.35 + 1.05 * tt + i * 0.18);
+      ctx.strokeStyle = `rgba(${gr}, ${gg}, ${gb}, ${s.strikePulse * 0.45 * (1 - i * 0.3)})`;
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(s.cx - sz, s.cy - sz, sz * 2, sz * 2);
+    }
+  }
+
+  const spawn = Math.floor(s.sustainCurrent * 5 + s.strikePulse * 8);
+  for (let i = 0; i < spawn; i++) {
+    const seg = Math.floor(Math.random() * segments);
+    sparks.push({
+      angle: seg * segWidth + s.rimAngle * 0.6,
+      speed: 0.6 + Math.random() * 0.9,
+      radius: r * 0.88,
+      life: 0,
+      maxLife: 0.55 + Math.random() * 0.8
+    });
+  }
+
+  for (let i = sparks.length - 1; i >= 0; i--) {
+    const sp = sparks[i];
+    sp.life += dt;
+    sp.angle += sp.speed * dt;
+    if (sp.life >= sp.maxLife) {
+      sparks.splice(i, 1);
+      continue;
+    }
+    const a = 1 - sp.life / sp.maxLife;
+    const x = s.cx + Math.cos(sp.angle) * sp.radius;
+    const y = s.cy + Math.sin(sp.angle) * sp.radius;
+    ctx.fillStyle = `rgba(${gr}, ${gg}, ${gb}, ${a})`;
+    ctx.fillRect(x - 2, y - 2, 4, 4);
+  }
+  if (sparks.length > 300) sparks.splice(0, sparks.length - 300);
+
+  ctx.fillStyle = `rgba(${gr}, ${gg}, ${gb}, ${0.3 + s.strikePulse * 0.7})`;
+  ctx.fillRect(s.cx - 3, s.cy - 3, 6, 6);
+}
+
 export default function Home() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -237,8 +677,10 @@ export default function Home() {
     strikePulse: 0,
     rimHighlight: 0,
     rimAngle: 0,
+    timeAcc: 0,
     hue: BOWLS[3].hue,
-    glow: BOWLS[3].glow
+    glow: BOWLS[3].glow,
+    mode: 'zen' as Mode
   });
 
   const [bowlIdx, setBowlIdx] = useState(3);
@@ -247,6 +689,7 @@ export default function Home() {
   const [railSide, setRailSide] = useState<'left' | 'right'>('right');
   const [isLandscape, setIsLandscape] = useState(false);
   const [audioReady, setAudioReady] = useState(false);
+  const [mode, setMode] = useState<Mode>('zen');
 
   const bowl = BOWLS[bowlIdx];
 
@@ -268,6 +711,15 @@ export default function Home() {
   useEffect(() => {
     if (engineRef.current) engineRef.current.setReverbMix(reverb);
   }, [reverb]);
+
+  useEffect(() => {
+    stateRef.current.mode = mode;
+    sparksRef.current.length = 0;
+    const root = document.documentElement;
+    root.dataset.mode = mode;
+    const preset = MODE_AUDIO[mode];
+    if (engineRef.current) engineRef.current.setVibrato(preset.vibratoRate, preset.vibratoDepth);
+  }, [mode]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -333,153 +785,21 @@ export default function Home() {
       const w = canvas.width / (window.devicePixelRatio || 1);
       const h = canvas.height / (window.devicePixelRatio || 1);
 
-      // smooth follow for sustain level
       s.sustainCurrent += (s.sustainTarget - s.sustainCurrent) * Math.min(1, dt * 6);
       s.strikePulse = Math.max(0, s.strikePulse - dt * 0.9);
       s.rimHighlight = Math.max(0, s.rimHighlight - dt * 1.2);
       s.rimAngle += dt * (0.3 + s.sustainCurrent * 1.4);
+      s.timeAcc += dt;
 
       ctx.clearRect(0, 0, w, h);
 
-      const [gr, gg, gb] = s.glow;
-      const liveGlow = 0.25 + s.sustainCurrent * 0.55 + s.strikePulse * 0.6;
-
-      // ambient backdrop wash
-      const back = ctx.createRadialGradient(s.cx, s.cy, 0, s.cx, s.cy, Math.max(w, h) * 0.7);
-      back.addColorStop(0, `rgba(${gr}, ${gg}, ${gb}, ${0.08 + liveGlow * 0.18})`);
-      back.addColorStop(0.45, `rgba(${gr}, ${gg}, ${gb}, ${0.02 + liveGlow * 0.05})`);
-      back.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.fillStyle = back;
-      ctx.fillRect(0, 0, w, h);
-
-      const r = s.radius;
-      const pulse = r * (1 + s.strikePulse * 0.035 + s.sustainCurrent * 0.012);
-
-      // outer halo
-      const halo = ctx.createRadialGradient(s.cx, s.cy, r * 0.6, s.cx, s.cy, r * 1.8);
-      halo.addColorStop(0, `rgba(${gr}, ${gg}, ${gb}, ${0.18 + liveGlow * 0.35})`);
-      halo.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.fillStyle = halo;
-      ctx.beginPath();
-      ctx.arc(s.cx, s.cy, r * 1.8, 0, Math.PI * 2);
-      ctx.fill();
-
-      // bowl body
-      const body = ctx.createRadialGradient(
-        s.cx - r * 0.25,
-        s.cy - r * 0.3,
-        r * 0.1,
-        s.cx,
-        s.cy,
-        pulse
-      );
-      body.addColorStop(0, `hsl(${s.hue}, 35%, 22%)`);
-      body.addColorStop(0.6, `hsl(${s.hue}, 40%, 12%)`);
-      body.addColorStop(1, `hsl(${s.hue}, 50%, 6%)`);
-      ctx.fillStyle = body;
-      ctx.beginPath();
-      ctx.arc(s.cx, s.cy, pulse, 0, Math.PI * 2);
-      ctx.fill();
-
-      // inner well (the basin)
-      const well = ctx.createRadialGradient(
-        s.cx + r * 0.15,
-        s.cy + r * 0.2,
-        r * 0.05,
-        s.cx,
-        s.cy,
-        r * 0.78
-      );
-      well.addColorStop(0, `hsl(${s.hue}, 45%, 16%)`);
-      well.addColorStop(0.7, 'rgba(8, 9, 14, 0.92)');
-      well.addColorStop(1, 'rgba(4, 5, 9, 1)');
-      ctx.fillStyle = well;
-      ctx.beginPath();
-      ctx.arc(s.cx, s.cy, r * 0.78, 0, Math.PI * 2);
-      ctx.fill();
-
-      // rim ring (metallic)
-      ctx.lineWidth = r * 0.07;
-      const rimGrad = ctx.createLinearGradient(
-        s.cx - r,
-        s.cy - r,
-        s.cx + r,
-        s.cy + r
-      );
-      rimGrad.addColorStop(0, `hsla(${s.hue}, 55%, 60%, 0.65)`);
-      rimGrad.addColorStop(0.5, `hsla(${s.hue}, 75%, 78%, 0.95)`);
-      rimGrad.addColorStop(1, `hsla(${s.hue}, 55%, 45%, 0.65)`);
-      ctx.strokeStyle = rimGrad;
-      ctx.beginPath();
-      ctx.arc(s.cx, s.cy, r * 0.88, 0, Math.PI * 2);
-      ctx.stroke();
-
-      // rim glow when active
-      if (s.rimHighlight > 0.001 || s.sustainCurrent > 0.001) {
-        ctx.save();
-        ctx.lineWidth = r * 0.04;
-        ctx.strokeStyle = `rgba(${gr}, ${gg}, ${gb}, ${Math.min(1, s.rimHighlight + s.sustainCurrent * 0.7)})`;
-        ctx.shadowColor = `rgba(${gr}, ${gg}, ${gb}, 0.9)`;
-        ctx.shadowBlur = 22 + s.sustainCurrent * 40;
-        ctx.beginPath();
-        ctx.arc(s.cx, s.cy, r * 0.88, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.restore();
+      if (s.mode === 'psychedelic') {
+        drawPsychedelic(ctx, s, w, h, dt, sparksRef.current);
+      } else if (s.mode === 'techno') {
+        drawTechno(ctx, s, w, h, dt, sparksRef.current);
+      } else {
+        drawZen(ctx, s, w, h, dt, sparksRef.current);
       }
-
-      // ripples after a strike
-      if (s.strikePulse > 0) {
-        ctx.save();
-        const t = 1 - s.strikePulse;
-        ctx.strokeStyle = `rgba(${gr}, ${gg}, ${gb}, ${s.strikePulse * 0.45})`;
-        ctx.lineWidth = 1.5;
-        ctx.beginPath();
-        ctx.arc(s.cx, s.cy, r * 0.35 + r * 0.45 * t, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.arc(s.cx, s.cy, r * 0.18 + r * 0.5 * t, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.restore();
-      }
-
-      // spawn sparks while singing
-      const spawn = Math.floor(s.sustainCurrent * 4 + s.strikePulse * 6);
-      for (let i = 0; i < spawn; i++) {
-        sparksRef.current.push({
-          angle: s.rimAngle + (Math.random() - 0.5) * 0.6,
-          speed: 0.4 + Math.random() * 1.2,
-          radius: r * 0.88 + (Math.random() - 0.5) * r * 0.06,
-          life: 0,
-          maxLife: 0.9 + Math.random() * 1.2
-        });
-      }
-
-      // update + draw sparks
-      const sparks = sparksRef.current;
-      for (let i = sparks.length - 1; i >= 0; i--) {
-        const sp = sparks[i];
-        sp.life += dt;
-        sp.angle += sp.speed * dt;
-        sp.radius += dt * r * 0.08;
-        if (sp.life >= sp.maxLife) {
-          sparks.splice(i, 1);
-          continue;
-        }
-        const a = 1 - sp.life / sp.maxLife;
-        const x = s.cx + Math.cos(sp.angle) * sp.radius;
-        const y = s.cy + Math.sin(sp.angle) * sp.radius;
-        ctx.fillStyle = `rgba(${gr}, ${gg}, ${gb}, ${a * 0.9})`;
-        ctx.beginPath();
-        ctx.arc(x, y, 1.6 + a * 1.4, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      if (sparks.length > 400) sparks.splice(0, sparks.length - 400);
-
-      // centre mark
-      ctx.fillStyle = `rgba(${gr}, ${gg}, ${gb}, ${0.18 + s.strikePulse * 0.6})`;
-      ctx.beginPath();
-      ctx.arc(s.cx, s.cy, r * 0.05, 0, Math.PI * 2);
-      ctx.fill();
 
       rafRef.current = window.requestAnimationFrame(draw);
     };
@@ -667,18 +987,37 @@ export default function Home() {
             />
           </label>
         </div>
-        {isLandscape ? (
-          <button
-            type="button"
-            className="rail-toggle"
-            onClick={() => setRailSide((s) => (s === 'left' ? 'right' : 'left'))}
-            aria-label={`Move bowl picker to ${railSide === 'left' ? 'right' : 'left'}`}
-          >
-            <span aria-hidden>{railSide === 'left' ? '→' : '←'}</span>
-          </button>
-        ) : (
-          <div className="rail-toggle-placeholder" aria-hidden />
-        )}
+        <div className="header-actions">
+          <div className="modes" role="radiogroup" aria-label="Visual mode">
+            {MODES.map((m) => (
+              <button
+                key={m.id}
+                type="button"
+                role="radio"
+                aria-checked={m.id === mode}
+                className={`mode-btn${m.id === mode ? ' active' : ''}`}
+                data-mode={m.id}
+                onClick={() => setMode(m.id)}
+                aria-label={m.label}
+                title={m.label}
+              >
+                <span className="mode-btn-short" aria-hidden>
+                  {m.short}
+                </span>
+              </button>
+            ))}
+          </div>
+          {isLandscape && (
+            <button
+              type="button"
+              className="rail-toggle"
+              onClick={() => setRailSide((s) => (s === 'left' ? 'right' : 'left'))}
+              aria-label={`Move bowl picker to ${railSide === 'left' ? 'right' : 'left'}`}
+            >
+              <span aria-hidden>{railSide === 'left' ? '→' : '←'}</span>
+            </button>
+          )}
+        </div>
       </header>
 
       <div className="stage" ref={stageRef}>
@@ -815,6 +1154,66 @@ export default function Home() {
           letter-spacing: 0.08em;
           text-transform: uppercase;
         }
+        .header-actions {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .modes {
+          display: flex;
+          gap: 3px;
+          padding: 3px;
+          background: rgba(255, 255, 255, 0.04);
+          border: 1px solid rgba(255, 255, 255, 0.07);
+          border-radius: 12px;
+        }
+        .mode-btn {
+          width: clamp(28px, 4.4vmin, 36px);
+          height: clamp(28px, 4.4vmin, 32px);
+          border-radius: 9px;
+          color: var(--t2);
+          font-family: var(--sans), system-ui, sans-serif;
+          font-size: clamp(10px, 1.5vmin, 12px);
+          font-weight: 600;
+          letter-spacing: 0.08em;
+          display: grid;
+          place-items: center;
+          transition: background 0.25s ease, color 0.25s ease, box-shadow 0.3s ease,
+            transform 0.2s ease;
+        }
+        .mode-btn:hover {
+          color: var(--t1);
+          background: rgba(255, 255, 255, 0.06);
+        }
+        .mode-btn:active {
+          transform: scale(0.94);
+        }
+        .mode-btn.active {
+          color: var(--t1);
+          background: linear-gradient(
+            180deg,
+            hsla(var(--hue), 70%, 32%, 0.55),
+            hsla(var(--hue), 70%, 18%, 0.45)
+          );
+          box-shadow: 0 0 12px rgba(var(--glow), 0.45),
+            inset 0 0 8px rgba(var(--glow), 0.25);
+        }
+        .mode-btn[data-mode='psychedelic'].active {
+          background: linear-gradient(
+            90deg,
+            hsla(310, 90%, 50%, 0.55),
+            hsla(180, 90%, 50%, 0.55),
+            hsla(50, 90%, 55%, 0.55)
+          );
+          color: #fff;
+          box-shadow: 0 0 16px hsla(290, 90%, 65%, 0.55);
+        }
+        .mode-btn[data-mode='techno'].active {
+          background: linear-gradient(180deg, #03161e, #02080d);
+          color: #6ff4ff;
+          box-shadow: 0 0 14px rgba(43, 247, 255, 0.55),
+            inset 0 0 6px rgba(43, 247, 255, 0.35);
+        }
         .rail-toggle {
           width: 36px;
           height: 36px;
@@ -832,10 +1231,6 @@ export default function Home() {
         }
         .rail-toggle:active {
           transform: scale(0.96);
-        }
-        .rail-toggle-placeholder {
-          width: 0;
-          height: 0;
         }
 
         .stage {
