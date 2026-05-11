@@ -232,7 +232,14 @@ export default function Bowl() {
       const s = stateRef.current
       s.cx = w / 2
       s.cy = h / 2
-      s.radius = Math.min(w, h) * 0.36
+      // On mobile/compact viewports, push the bowl up to at least 0.8 of the
+      // smaller viewport dimension. On desktop, preserve the original sizing
+      // (0.36 × min(canvas)) since the layout already looks right.
+      const vMin = Math.min(window.innerWidth, window.innerHeight)
+      const cMin = Math.min(w, h)
+      const compact = vMin < 760
+      const desired = compact ? vMin * 0.42 : cMin * 0.36
+      s.radius = Math.min(desired, cMin * 0.48)
     }
     resize()
     window.addEventListener('resize', resize)
@@ -546,16 +553,16 @@ export default function Bowl() {
   const cssHue = useMemo(() => `hsl(${hue} 70% 65%)`, [hue])
 
   return (
-    <main style={styles.main}>
-      <header style={styles.header}>
-        <div style={styles.titleBlock}>
+    <main className="bowl-main" style={styles.main}>
+      <header className="bowl-header" style={styles.header}>
+        <div className="bowl-titleBlock" style={styles.titleBlock}>
           <div style={styles.titleRow}>
             <BowlMark hue={hue} />
-            <div style={{ ...styles.title, color: cssHue }}>Singing Bowl</div>
+            <div className="bowl-title" style={{ ...styles.title, color: cssHue }}>Singing Bowl</div>
           </div>
-          <div style={styles.subtitle}>{bowl.name} · {bowl.note} · {bowl.desc}</div>
+          <div className="bowl-subtitle" style={styles.subtitle}>{bowl.name} · {bowl.note} · {bowl.desc}</div>
         </div>
-        <div style={styles.headerControls}>
+        <div className="bowl-headerControls" style={styles.headerControls}>
           <Knob
             label="Reverb"
             value={reverb}
@@ -571,8 +578,8 @@ export default function Bowl() {
         </div>
       </header>
 
-      <div style={styles.stage}>
-        <canvas ref={canvasRef} style={styles.canvas} />
+      <div className="bowl-stage" style={styles.stage}>
+        <canvas ref={canvasRef} className="bowl-canvas" style={styles.canvas} />
         {!started && (
           <div style={styles.overlay} onPointerDown={ensureStarted}>
             <div style={styles.overlayInner}>
@@ -582,7 +589,7 @@ export default function Bowl() {
           </div>
         )}
         {started && hint && (
-          <div style={styles.hint}>
+          <div className="bowl-hint" style={styles.hint}>
             Trace the rim slowly. Tap the centre to strike.
           </div>
         )}
@@ -597,12 +604,13 @@ export default function Bowl() {
         </div>
       </div>
 
-      <footer style={styles.footer}>
+      <footer className="bowl-footer" style={styles.footer}>
         {BOWLS.map((b, i) => {
           const active = i === bowlIdx
           return (
             <button
               key={b.note}
+              className={`bowl-chip${active ? ' is-active' : ''}`}
               onClick={async () => { setBowlIdx(i); await ensureStarted() }}
               style={{
                 ...styles.bowlChip,
@@ -615,13 +623,78 @@ export default function Bowl() {
               title={`${b.name} · ${b.note} · ${b.desc}`}
             >
               <span style={styles.chipNote}>{b.note}</span>
-              <span style={styles.chipName}>{b.name}</span>
+              <span className="bowl-chip-name" style={styles.chipName}>{b.name}</span>
             </button>
           )
         })}
       </footer>
 
-      <div style={styles.hotkeys}>1–7 selects a bowl · Space strikes</div>
+      <div className="bowl-hotkeys" style={styles.hotkeys}>1–7 selects a bowl · Space strikes</div>
+
+      <style jsx global>{`
+        /* Mobile portrait: tighten header + footer, hide chip names, hide hotkeys.
+           The bowl radius is already clamped to ≥ 0.42 × min(viewport) in JS. */
+        @media (orientation: portrait) and (max-width: 760px) {
+          .bowl-header {
+            padding: 14px 16px 6px !important;
+            flex-wrap: wrap;
+            gap: 10px;
+          }
+          .bowl-title { font-size: 22px !important; }
+          .bowl-subtitle { font-size: 11px !important; }
+          .bowl-headerControls { gap: 14px !important; }
+          .bowl-headerControls .knob-label { display: none !important; }
+          .bowl-headerControls input[type='range'] { width: 84px !important; }
+          .bowl-footer {
+            padding: 8px 10px 18px !important;
+            gap: 8px !important;
+            justify-content: center !important;
+          }
+          .bowl-chip {
+            width: 50px !important;
+            height: 50px !important;
+          }
+          .bowl-chip-name { display: none !important; }
+          .bowl-hotkeys { display: none !important; }
+          .bowl-hint { bottom: 14px !important; font-size: 11px !important; }
+        }
+        /* Mobile landscape: bowl centered in left stage, note buttons stack on the right. */
+        @media (orientation: landscape) and (max-height: 500px) {
+          .bowl-main {
+            grid-template-rows: auto 1fr !important;
+            grid-template-columns: 1fr auto !important;
+            grid-template-areas: 'header header' 'stage footer' !important;
+          }
+          .bowl-header {
+            grid-area: header;
+            padding: 6px 14px 2px !important;
+            flex-wrap: wrap;
+            gap: 8px;
+          }
+          .bowl-title { font-size: 18px !important; }
+          .bowl-subtitle { font-size: 10px !important; }
+          .bowl-headerControls { gap: 12px !important; }
+          .bowl-headerControls .knob-label { display: none !important; }
+          .bowl-headerControls input[type='range'] { width: 72px !important; }
+          .bowl-stage { grid-area: stage; }
+          .bowl-footer {
+            grid-area: footer;
+            flex-direction: column !important;
+            flex-wrap: nowrap !important;
+            padding: 4px 10px 4px 4px !important;
+            gap: 6px !important;
+            justify-content: center !important;
+            align-items: center;
+          }
+          .bowl-chip {
+            width: 44px !important;
+            height: 44px !important;
+          }
+          .bowl-chip-name { display: none !important; }
+          .bowl-hotkeys { display: none !important; }
+          .bowl-hint { bottom: 8px !important; font-size: 10px !important; }
+        }
+      `}</style>
     </main>
   )
 }
@@ -661,9 +734,10 @@ function Knob({
   label, value, onChange, hue,
 }: { label: string; value: number; onChange: (v: number) => void; hue: number }) {
   return (
-    <label style={styles.knob}>
-      <span style={styles.knobLabel}>{label}</span>
+    <label className="knob" style={styles.knob}>
+      <span className="knob-label" style={styles.knobLabel}>{label}</span>
       <input
+        className="knob-range"
         type="range"
         min={0}
         max={1}
@@ -675,7 +749,7 @@ function Knob({
           accentColor: `hsl(${hue} 70% 65%)`,
         }}
       />
-      <span style={styles.knobValue}>{Math.round(value * 100)}</span>
+      <span className="knob-value" style={styles.knobValue}>{Math.round(value * 100)}</span>
     </label>
   )
 }
