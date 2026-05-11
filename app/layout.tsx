@@ -16,9 +16,8 @@ const sans = Outfit({
 });
 
 export const metadata: Metadata = {
-  title: 'Singing Bowl',
-  description:
-    'A chakra-tuned singing bowl: trace the rim to sing, tap the centre to strike.'
+  title: 'Birthday Bowl',
+  description: 'Eight glowing candle-bowls tuned to a full octave. Tap to ring.'
 };
 
 export const viewport: Viewport = {
@@ -26,7 +25,7 @@ export const viewport: Viewport = {
   initialScale: 1,
   maximumScale: 1,
   userScalable: false,
-  themeColor: '#0c0e14',
+  themeColor: '#1a0738',
   viewportFit: 'cover'
 };
 

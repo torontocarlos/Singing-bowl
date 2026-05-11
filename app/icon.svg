@@ -1,30 +1,34 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
   <defs>
-    <radialGradient id="halo" cx="50%" cy="50%" r="50%">
-      <stop offset="0%" stop-color="#f6dca2" stop-opacity="0.55"/>
-      <stop offset="60%" stop-color="#b07a2c" stop-opacity="0.15"/>
-      <stop offset="100%" stop-color="#000" stop-opacity="0"/>
-    </radialGradient>
-    <linearGradient id="rim" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#5b3d12"/>
-      <stop offset="35%" stop-color="#e6c172"/>
-      <stop offset="55%" stop-color="#fff3c8"/>
-      <stop offset="75%" stop-color="#d3a14c"/>
-      <stop offset="100%" stop-color="#3b2607"/>
+    <linearGradient id="cake" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fff1d2"/>
+      <stop offset="100%" stop-color="#d99368"/>
     </linearGradient>
-    <radialGradient id="well" cx="55%" cy="58%" r="55%">
-      <stop offset="0%" stop-color="#1a1308"/>
-      <stop offset="60%" stop-color="#0a0a10"/>
-      <stop offset="100%" stop-color="#000"/>
-    </radialGradient>
-    <linearGradient id="sheen" x1="20%" y1="20%" x2="80%" y2="40%">
-      <stop offset="0%" stop-color="#fff7d8" stop-opacity="0.9"/>
-      <stop offset="100%" stop-color="#fff7d8" stop-opacity="0"/>
+    <linearGradient id="frosting" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#ffe1ec"/>
     </linearGradient>
+    <radialGradient id="flame" cx="50%" cy="65%" r="50%">
+      <stop offset="0%" stop-color="#fffac0"/>
+      <stop offset="45%" stop-color="#ffd060"/>
+      <stop offset="80%" stop-color="#ff7a30"/>
+      <stop offset="100%" stop-color="#ff3b1a" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ffe39e" stop-opacity="0.7"/>
+      <stop offset="100%" stop-color="#ffe39e" stop-opacity="0"/>
+    </radialGradient>
   </defs>
-  <circle cx="32" cy="32" r="30" fill="url(#halo)"/>
-  <circle cx="32" cy="32" r="24" fill="url(#rim)"/>
-  <circle cx="32" cy="32" r="17" fill="url(#well)"/>
-  <path d="M16 24 Q32 14 48 24" stroke="url(#sheen)" stroke-width="2.2" fill="none" stroke-linecap="round" opacity="0.85"/>
-  <circle cx="32" cy="32" r="1.6" fill="#f6dca2" opacity="0.85"/>
+  <circle cx="32" cy="14" r="13" fill="url(#glow)"/>
+  <rect x="6" y="32" width="52" height="22" rx="5" fill="url(#cake)"/>
+  <path d="M6 31 Q11 26 16 31 Q21 26 26 31 Q31 26 36 31 Q41 26 46 31 Q51 26 56 31 L58 33 L58 36 L6 36 Z" fill="url(#frosting)"/>
+  <rect x="29" y="14" width="6" height="16" rx="1.6" fill="#ff77a0"/>
+  <rect x="31.2" y="11" width="1.6" height="3.5" fill="#2a1408"/>
+  <path d="M32 4 C 28 9 27 14 32 15 C 37 14 36 9 32 4 Z" fill="url(#flame)"/>
+  <circle cx="14" cy="44" r="1.6" fill="#ff7a8e"/>
+  <circle cx="22" cy="48" r="1.6" fill="#ffcc55"/>
+  <circle cx="30" cy="44" r="1.6" fill="#8fd1ff"/>
+  <circle cx="38" cy="48" r="1.6" fill="#c79bff"/>
+  <circle cx="46" cy="44" r="1.6" fill="#7fe3a8"/>
+  <circle cx="50" cy="48" r="1.4" fill="#ff9ec7"/>
 </svg>
