@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <radialGradient id="halo" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#f6dca2" stop-opacity="0.55"/>
+      <stop offset="60%" stop-color="#b07a2c" stop-opacity="0.15"/>
+      <stop offset="100%" stop-color="#000" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="rim" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#5b3d12"/>
+      <stop offset="35%" stop-color="#e6c172"/>
+      <stop offset="55%" stop-color="#fff3c8"/>
+      <stop offset="75%" stop-color="#d3a14c"/>
+      <stop offset="100%" stop-color="#3b2607"/>
+    </linearGradient>
+    <radialGradient id="well" cx="55%" cy="58%" r="55%">
+      <stop offset="0%" stop-color="#1a1308"/>
+      <stop offset="60%" stop-color="#0a0a10"/>
+      <stop offset="100%" stop-color="#000"/>
+    </radialGradient>
+    <linearGradient id="sheen" x1="20%" y1="20%" x2="80%" y2="40%">
+      <stop offset="0%" stop-color="#fff7d8" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#fff7d8" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <circle cx="32" cy="32" r="30" fill="url(#halo)"/>
+  <circle cx="32" cy="32" r="24" fill="url(#rim)"/>
+  <circle cx="32" cy="32" r="17" fill="url(#well)"/>
+  <path d="M16 24 Q32 14 48 24" stroke="url(#sheen)" stroke-width="2.2" fill="none" stroke-linecap="round" opacity="0.85"/>
+  <circle cx="32" cy="32" r="1.6" fill="#f6dca2" opacity="0.85"/>
+</svg>
