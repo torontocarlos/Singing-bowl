@@ -41,9 +41,6 @@ class BowlVoice {
     this.vibrato.connect(this.vibratoGain)
     this.vibrato.start()
 
-    // Inharmonic partials approximate a real singing bowl's spectrum.
-    // The slight detune between paired oscillators creates the
-    // characteristic shimmering beat tone.
     const ratios = [1.0, 2.76, 5.40, 8.93, 13.34]
     const amps   = [1.0, 0.55, 0.28, 0.14, 0.07]
     const beats  = [0.4, 1.2, 2.0, 2.8, 3.6]
@@ -155,13 +152,14 @@ class BowlEngine {
 }
 
 type Ripple = { x: number; y: number; r: number; alpha: number; hue: number }
-type Trail  = { x: number; y: number; t: number }
+type MotionStatus = 'idle' | 'granted' | 'denied' | 'unavailable'
 
-export default function Bowl() {
+export default function MotionBowl() {
   const [bowlIdx, setBowlIdx] = useState(5)
   const [reverb, setReverb] = useState(0.45)
   const [volume, setVolume] = useState(0.75)
   const [started, setStarted] = useState(false)
+  const [motion, setMotion] = useState<MotionStatus>('idle')
   const [intensityDisplay, setIntensityDisplay] = useState(0)
   const [hint, setHint] = useState(true)
 
@@ -174,42 +172,62 @@ export default function Bowl() {
 
   const stateRef = useRef({
     cx: 0, cy: 0, radius: 0,
-    pointerActive: false,
-    pointerOnRim: false,
-    pointerX: 0, pointerY: 0,
-    lastAngle: 0,
+    lastAlpha: null as number | null,
     lastT: 0,
-    speed: 0,
-    intensity: 0,
+    speed: 0,                 // smoothed degrees/sec
+    alphaDeg: 0,              // most recent alpha in degrees (compass)
     targetIntensity: 0,
+    intensity: 0,
+    glowPulse: 0,
     ripples: [] as Ripple[],
-    trails: [] as Trail[],
     sparks: Array.from({ length: 56 }, (_, i) => ({
       angle: (i / 56) * Math.PI * 2,
       phase: Math.random() * Math.PI * 2,
       r: 0,
     })),
     hue,
-    glowPulse: 0,
+    motionLive: false,        // becomes true once at least one orientation event has been received
   })
 
-  // keep hue current for the animation loop
   useEffect(() => { stateRef.current.hue = hue }, [hue])
+
+  const needsExplicitPermission = useMemo(() => {
+    if (typeof window === 'undefined') return false
+    const D: any = (window as any).DeviceOrientationEvent
+    return D && typeof D.requestPermission === 'function'
+  }, [])
+
+  const requestMotion = useCallback(async (): Promise<MotionStatus> => {
+    if (typeof window === 'undefined' || typeof (window as any).DeviceOrientationEvent === 'undefined') {
+      return 'unavailable'
+    }
+    const D: any = (window as any).DeviceOrientationEvent
+    if (typeof D.requestPermission === 'function') {
+      try {
+        const result = await D.requestPermission()
+        return result === 'granted' ? 'granted' : 'denied'
+      } catch {
+        return 'denied'
+      }
+    }
+    return 'granted'
+  }, [])
 
   const ensureStarted = useCallback(async () => {
     if (!engineRef.current) engineRef.current = new BowlEngine()
     await engineRef.current.resume()
     if (!engineRef.current.voice) engineRef.current.loadBowl(bowl.freq)
+    const next = await requestMotion()
+    setMotion(next)
     setStarted(true)
-  }, [bowl.freq])
+  }, [bowl.freq, requestMotion])
 
   useEffect(() => {
     if (!started) return
-    const id = setTimeout(() => setHint(false), 5000)
+    const id = setTimeout(() => setHint(false), 6000)
     return () => clearTimeout(id)
   }, [started])
 
-  // swap bowl voice when selection changes
   useEffect(() => {
     if (engineRef.current && started) engineRef.current.loadBowl(bowl.freq)
   }, [bowl.freq, started])
@@ -232,9 +250,6 @@ export default function Bowl() {
       const s = stateRef.current
       s.cx = w / 2
       s.cy = h / 2
-      // On mobile/compact viewports, push the bowl up to at least 0.8 of the
-      // smaller viewport dimension. On desktop, preserve the original sizing
-      // (0.36 × min(canvas)) since the layout already looks right.
       const vMin = Math.min(window.innerWidth, window.innerHeight)
       const cMin = Math.min(w, h)
       const compact = vMin < 760
@@ -246,113 +261,67 @@ export default function Bowl() {
     return () => window.removeEventListener('resize', resize)
   }, [])
 
-  // Pointer handling
+  // Tap anywhere to strike the bowl. No rim tracing in motion mode.
   useEffect(() => {
     const cvs = canvasRef.current
     if (!cvs) return
-
-    const localXY = (e: PointerEvent) => {
-      const rect = cvs.getBoundingClientRect()
-      return { x: e.clientX - rect.left, y: e.clientY - rect.top }
-    }
-
     const onDown = async (e: PointerEvent) => {
-      const { x, y } = localXY(e)
+      const rect = cvs.getBoundingClientRect()
+      const x = e.clientX - rect.left
+      const y = e.clientY - rect.top
       const s = stateRef.current
-      const dx = x - s.cx, dy = y - s.cy
-      const dist = Math.hypot(dx, dy)
-      const inner = s.radius * 0.55
-      const outer = s.radius * 1.05
-      cvs.setPointerCapture(e.pointerId)
-      await ensureStarted()
-      if (dist < inner) {
-        // Strike the bowl
-        engineRef.current?.voice?.strike(0.6)
-        spawnRipple(x, y, true)
-        s.glowPulse = 1
+      const dist = Math.hypot(x - s.cx, y - s.cy)
+      if (dist > s.radius * 1.1) return
+      if (!started) {
+        await ensureStarted()
+      }
+      engineRef.current?.voice?.strike(0.6)
+      s.glowPulse = 1
+      s.ripples.push({ x: s.cx, y: s.cy, r: 12, alpha: 1, hue: s.hue })
+    }
+    cvs.addEventListener('pointerdown', onDown)
+    return () => cvs.removeEventListener('pointerdown', onDown)
+  }, [ensureStarted, started])
+
+  // Device orientation -> rotation-rate-driven intensity
+  useEffect(() => {
+    if (!started || motion !== 'granted') return
+    if (typeof window === 'undefined') return
+
+    const onOrient = (e: DeviceOrientationEvent) => {
+      const a = e.alpha
+      if (a == null) return
+      const s = stateRef.current
+      const now = performance.now()
+      s.alphaDeg = a
+      s.motionLive = true
+      if (s.lastAlpha == null) {
+        s.lastAlpha = a
+        s.lastT = now
         return
       }
-      if (dist <= outer) {
-        s.pointerActive = true
-        s.pointerOnRim = true
-        s.pointerX = x; s.pointerY = y
-        s.lastAngle = Math.atan2(dy, dx)
-        s.lastT = performance.now()
-        s.speed = 0
+      const dt = Math.max(1, now - s.lastT) / 1000
+      let da = a - s.lastAlpha
+      if (da > 180) da -= 360
+      if (da < -180) da += 360
+      const angVel = Math.abs(da) / dt
+      s.speed = s.speed * 0.7 + angVel * 0.3
+      // 20 deg/s -> silent, ~260 deg/s -> max
+      s.targetIntensity = Math.min(1, Math.max(0, (s.speed - 20) / 240))
+      s.lastAlpha = a
+      s.lastT = now
+      if (Math.random() < 0.18 + s.targetIntensity * 0.45) {
+        const ang = (a - 90) * Math.PI / 180
+        const x = s.cx + Math.cos(ang) * s.radius
+        const y = s.cy + Math.sin(ang) * s.radius
+        s.ripples.push({ x, y, r: 4, alpha: 0.7, hue: s.hue })
+        if (s.ripples.length > 60) s.ripples.shift()
       }
     }
 
-    const onMove = (e: PointerEvent) => {
-      const { x, y } = localXY(e)
-      const s = stateRef.current
-      s.pointerX = x; s.pointerY = y
-      const dx = x - s.cx, dy = y - s.cy
-      const dist = Math.hypot(dx, dy)
-      const inner = s.radius * 0.55
-      const outer = s.radius * 1.15
-      const onRim = dist >= inner && dist <= outer
-      s.pointerOnRim = onRim
-
-      if (s.pointerActive && onRim) {
-        const angle = Math.atan2(dy, dx)
-        let d = angle - s.lastAngle
-        // wrap into -PI..PI
-        if (d > Math.PI) d -= Math.PI * 2
-        if (d < -Math.PI) d += Math.PI * 2
-        const now = performance.now()
-        const dt = Math.max(1, now - s.lastT)
-        const angVel = Math.abs(d) / (dt / 1000) // rad/s
-        // smooth speed
-        s.speed = s.speed * 0.7 + angVel * 0.3
-        s.lastAngle = angle
-        s.lastT = now
-        s.targetIntensity = Math.min(1, s.speed / 6)
-        // emit ripple at the touch point, modulated by speed
-        if (Math.random() < 0.25 + s.targetIntensity * 0.5) {
-          spawnRipple(x, y)
-        }
-        // trail
-        s.trails.push({ x, y, t: now })
-        if (s.trails.length > 60) s.trails.shift()
-      }
-    }
-
-    const onUp = (e: PointerEvent) => {
-      const s = stateRef.current
-      s.pointerActive = false
-      s.targetIntensity = 0
-      try { cvs.releasePointerCapture(e.pointerId) } catch {}
-    }
-
-    const onLeave = () => {
-      const s = stateRef.current
-      s.pointerOnRim = false
-    }
-
-    cvs.addEventListener('pointerdown', onDown)
-    cvs.addEventListener('pointermove', onMove)
-    cvs.addEventListener('pointerup', onUp)
-    cvs.addEventListener('pointercancel', onUp)
-    cvs.addEventListener('pointerleave', onLeave)
-    return () => {
-      cvs.removeEventListener('pointerdown', onDown)
-      cvs.removeEventListener('pointermove', onMove)
-      cvs.removeEventListener('pointerup', onUp)
-      cvs.removeEventListener('pointercancel', onUp)
-      cvs.removeEventListener('pointerleave', onLeave)
-    }
-  }, [ensureStarted])
-
-  const spawnRipple = (x: number, y: number, big = false) => {
-    const s = stateRef.current
-    s.ripples.push({
-      x, y,
-      r: big ? 12 : 4,
-      alpha: big ? 1 : 0.85,
-      hue: s.hue,
-    })
-    if (s.ripples.length > 60) s.ripples.shift()
-  }
+    window.addEventListener('deviceorientation', onOrient)
+    return () => window.removeEventListener('deviceorientation', onOrient)
+  }, [started, motion])
 
   // Animation + audio level loop
   useEffect(() => {
@@ -366,20 +335,21 @@ export default function Bowl() {
       last = now
       const s = stateRef.current
 
-      // Smooth intensity toward target
-      const decay = s.pointerActive ? 0.15 : 0.6
-      s.intensity += (s.targetIntensity - s.intensity) * Math.min(1, decay * (dt * 60) / 8)
+      // Decay rotation speed if no recent updates (motion stops -> intensity falls)
+      if (now - s.lastT > 120) {
+        s.speed *= Math.pow(0.001, dt)
+        s.targetIntensity = Math.min(s.targetIntensity, s.speed / 240)
+      }
 
-      // Glow pulse decay
+      const decay = 0.5
+      s.intensity += (s.targetIntensity - s.intensity) * Math.min(1, decay * (dt * 60) / 8)
       s.glowPulse *= Math.pow(0.001, dt)
 
-      // Drive audio
       const v = engineRef.current?.voice
       if (v) {
-        // Combine sustained circling level with strike-driven level
         const base = v.currentLevel()
         const target = Math.max(base * 0.92 ** (dt * 12), s.intensity * 0.85)
-        if (s.pointerActive) v.setLevel(s.intensity * 0.85, 0.15)
+        if (s.intensity > 0.02) v.setLevel(s.intensity * 0.85, 0.15)
         else if (target < base) v.setLevel(target, 0.4)
       }
 
@@ -389,7 +359,6 @@ export default function Bowl() {
       const w = cvs.clientWidth, h = cvs.clientHeight
       ctx.clearRect(0, 0, w, h)
 
-      // Background ambient glow
       const bgGrad = ctx.createRadialGradient(s.cx, s.cy, s.radius * 0.2, s.cx, s.cy, s.radius * 3)
       const ambient = 0.18 + s.intensity * 0.18 + s.glowPulse * 0.12
       bgGrad.addColorStop(0, `hsla(${s.hue}, 60%, 35%, ${ambient})`)
@@ -397,7 +366,6 @@ export default function Bowl() {
       ctx.fillStyle = bgGrad
       ctx.fillRect(0, 0, w, h)
 
-      // Outer glow ring
       const glowR = s.radius * (1.05 + s.intensity * 0.06 + s.glowPulse * 0.08)
       const glow = ctx.createRadialGradient(s.cx, s.cy, s.radius * 0.7, s.cx, s.cy, glowR * 1.7)
       glow.addColorStop(0, `hsla(${s.hue}, 80%, 60%, 0)`)
@@ -408,7 +376,6 @@ export default function Bowl() {
       ctx.arc(s.cx, s.cy, glowR * 1.7, 0, Math.PI * 2)
       ctx.fill()
 
-      // Bowl body — metallic radial gradient
       const bodyGrad = ctx.createRadialGradient(
         s.cx - s.radius * 0.35, s.cy - s.radius * 0.45, s.radius * 0.1,
         s.cx, s.cy, s.radius
@@ -422,7 +389,6 @@ export default function Bowl() {
       ctx.fillStyle = bodyGrad
       ctx.fill()
 
-      // Inner well (darker recessed center) suggesting a bowl seen from above
       const wellR = s.radius * 0.78
       const well = ctx.createRadialGradient(s.cx, s.cy - s.radius * 0.05, wellR * 0.05, s.cx, s.cy, wellR)
       well.addColorStop(0, `hsla(${s.hue}, 60%, 8%, 1)`)
@@ -433,14 +399,12 @@ export default function Bowl() {
       ctx.fillStyle = well
       ctx.fill()
 
-      // Inner ripple-like rings inside the well, intensifying with sound
       ctx.save()
       ctx.beginPath()
       ctx.arc(s.cx, s.cy, wellR, 0, Math.PI * 2)
       ctx.clip()
-      const ringCount = 6
-      for (let i = 0; i < ringCount; i++) {
-        const phase = (now / 1400 + i / ringCount) % 1
+      for (let i = 0; i < 6; i++) {
+        const phase = (now / 1400 + i / 6) % 1
         const rr = phase * wellR
         const a = (1 - phase) * (0.05 + s.intensity * 0.35)
         ctx.beginPath()
@@ -451,21 +415,18 @@ export default function Bowl() {
       }
       ctx.restore()
 
-      // Rim highlight
       ctx.beginPath()
       ctx.arc(s.cx, s.cy, s.radius * 0.99, 0, Math.PI * 2)
       ctx.strokeStyle = `hsla(${s.hue}, 50%, 80%, 0.55)`
       ctx.lineWidth = 1.5
       ctx.stroke()
 
-      // Inner rim shadow
       ctx.beginPath()
       ctx.arc(s.cx, s.cy, s.radius * 0.78, 0, Math.PI * 2)
       ctx.strokeStyle = 'rgba(0,0,0,0.55)'
       ctx.lineWidth = 2
       ctx.stroke()
 
-      // Orbiting sparks on the rim
       const sparkR = s.radius * 0.88
       s.sparks.forEach((sp, i) => {
         sp.angle += dt * (0.05 + s.intensity * 0.6)
@@ -480,22 +441,24 @@ export default function Bowl() {
         ctx.fill()
       })
 
-      // Trail behind cursor on rim
-      if (s.trails.length > 1) {
-        ctx.lineCap = 'round'
-        for (let i = 1; i < s.trails.length; i++) {
-          const a = i / s.trails.length
-          const p0 = s.trails[i - 1]
-          const p1 = s.trails[i]
-          const age = (now - p1.t) / 600
-          if (age > 1) continue
-          ctx.strokeStyle = `hsla(${s.hue}, 90%, 80%, ${(1 - age) * a * 0.7})`
-          ctx.lineWidth = 1.5 + (1 - age) * 4 * s.intensity
-          ctx.beginPath()
-          ctx.moveTo(p0.x, p0.y)
-          ctx.lineTo(p1.x, p1.y)
-          ctx.stroke()
-        }
+      // Mallet indicator: dot on the rim at the compass-heading angle.
+      // Drawn only once we've actually received an orientation sample.
+      if (s.motionLive) {
+        const malletAng = (s.alphaDeg - 90) * Math.PI / 180
+        const mx = s.cx + Math.cos(malletAng) * sparkR
+        const my = s.cy + Math.sin(malletAng) * sparkR
+        const mr = 10 + s.intensity * 12
+        const grad = ctx.createRadialGradient(mx, my, 0, mx, my, mr)
+        grad.addColorStop(0, `hsla(${s.hue}, 95%, 92%, ${0.85 + s.intensity * 0.15})`)
+        grad.addColorStop(1, `hsla(${s.hue}, 95%, 70%, 0)`)
+        ctx.fillStyle = grad
+        ctx.beginPath()
+        ctx.arc(mx, my, mr, 0, Math.PI * 2)
+        ctx.fill()
+        ctx.beginPath()
+        ctx.arc(mx, my, 2.4, 0, Math.PI * 2)
+        ctx.fillStyle = `hsla(${s.hue}, 95%, 96%, ${0.9})`
+        ctx.fill()
       }
 
       // Ripples
@@ -509,18 +472,6 @@ export default function Bowl() {
         ctx.strokeStyle = `hsla(${r.hue}, 90%, 75%, ${r.alpha})`
         ctx.lineWidth = 1.2
         ctx.stroke()
-      }
-
-      // Mallet indicator
-      if (s.pointerOnRim) {
-        const mr = 10 + s.intensity * 10
-        const grad = ctx.createRadialGradient(s.pointerX, s.pointerY, 0, s.pointerX, s.pointerY, mr)
-        grad.addColorStop(0, `hsla(${s.hue}, 95%, 92%, ${0.7 + s.intensity * 0.3})`)
-        grad.addColorStop(1, `hsla(${s.hue}, 95%, 70%, 0)`)
-        ctx.fillStyle = grad
-        ctx.beginPath()
-        ctx.arc(s.pointerX, s.pointerY, mr, 0, Math.PI * 2)
-        ctx.fill()
       }
 
       rafRef.current = requestAnimationFrame(tick)
@@ -540,17 +491,33 @@ export default function Bowl() {
         setBowlIdx(parseInt(e.key, 10) - 1)
       } else if (e.code === 'Space') {
         e.preventDefault()
-        await ensureStarted()
+        if (!started) await ensureStarted()
         engineRef.current?.voice?.strike(0.6)
-        const s = stateRef.current
-        s.glowPulse = 1
+        stateRef.current.glowPulse = 1
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [ensureStarted])
+  }, [ensureStarted, started])
 
   const cssHue = useMemo(() => `hsl(${hue} 70% 65%)`, [hue])
+
+  const overlayCopy = (() => {
+    if (!started) {
+      return needsExplicitPermission
+        ? 'Tap to wake the bowl and allow motion access.'
+        : 'Tap to wake the bowl.'
+    }
+    return null
+  })()
+
+  const statusLine = (() => {
+    if (!started) return null
+    if (motion === 'granted') return null
+    if (motion === 'denied') return 'Motion access blocked — tap the bowl to strike.'
+    if (motion === 'unavailable') return 'No motion sensor — tap the bowl to strike.'
+    return null
+  })()
 
   return (
     <main className="bowl-main" style={styles.main}>
@@ -558,40 +525,16 @@ export default function Bowl() {
         <div className="bowl-titleBlock" style={styles.titleBlock}>
           <div style={styles.titleRow}>
             <BowlMark hue={hue} />
-            <div className="bowl-title" style={{ ...styles.title, color: cssHue }}>Singing Bowl</div>
+            <div className="bowl-title" style={{ ...styles.title, color: cssHue }}>Singing Bowl · Motion</div>
           </div>
-          <div className="bowl-subtitle" style={styles.subtitle}>{bowl.name} · {bowl.note} · {bowl.desc}</div>
+          <div className="bowl-subtitle" style={styles.subtitle}>
+            {bowl.name} · {bowl.note} · {bowl.desc}
+          </div>
         </div>
         <div className="bowl-headerControls" style={styles.headerControls}>
-          <a
-            href="/motion"
-            style={{
-              fontSize: 11,
-              letterSpacing: 0.5,
-              textTransform: 'uppercase',
-              color: 'rgba(255,255,255,0.55)',
-              textDecoration: 'none',
-              border: '1px solid rgba(255,255,255,0.1)',
-              padding: '6px 10px',
-              borderRadius: 999,
-              transition: 'color 0.2s ease, border-color 0.2s ease',
-            }}
-            aria-label="Switch to motion-controlled bowl"
-          >
-            ↻ Motion
-          </a>
-          <Knob
-            label="Reverb"
-            value={reverb}
-            onChange={setReverb}
-            hue={hue}
-          />
-          <Knob
-            label="Volume"
-            value={volume}
-            onChange={setVolume}
-            hue={hue}
-          />
+          <a href="/" style={styles.backLink} aria-label="Back to finger-controlled bowl">↺ Finger</a>
+          <Knob label="Reverb" value={reverb} onChange={setReverb} hue={hue} />
+          <Knob label="Volume" value={volume} onChange={setVolume} hue={hue} />
         </div>
       </header>
 
@@ -601,14 +544,17 @@ export default function Bowl() {
           <div style={styles.overlay} onPointerDown={ensureStarted}>
             <div style={styles.overlayInner}>
               <div style={{ ...styles.overlayTitle, color: cssHue }}>Begin</div>
-              <div style={styles.overlayText}>Tap or click anywhere on the bowl to awaken it.</div>
+              <div style={styles.overlayText}>{overlayCopy}</div>
             </div>
           </div>
         )}
-        {started && hint && (
+        {started && hint && motion === 'granted' && (
           <div className="bowl-hint" style={styles.hint}>
-            Trace the rim slowly. Tap the centre to strike.
+            Rotate the phone smoothly. Tap the bowl to strike.
           </div>
+        )}
+        {statusLine && (
+          <div className="bowl-hint" style={styles.hint}>{statusLine}</div>
         )}
         <div style={styles.meter} aria-hidden>
           <div
@@ -628,7 +574,7 @@ export default function Bowl() {
             <button
               key={b.note}
               className={`bowl-chip${active ? ' is-active' : ''}`}
-              onClick={async () => { setBowlIdx(i); await ensureStarted() }}
+              onClick={async () => { setBowlIdx(i); if (!started) await ensureStarted() }}
               style={{
                 ...styles.bowlChip,
                 borderColor: active ? `hsl(${b.hue} 70% 60%)` : 'transparent',
@@ -649,11 +595,7 @@ export default function Bowl() {
       <div className="bowl-hotkeys" style={styles.hotkeys}>1–7 selects a bowl · Space strikes</div>
 
       <style jsx global>{`
-        /* Without an explicit column template the grid column defaults to
-           'auto' and expands to fit the widest child — on a 390 px iPhone
-           that's the header, which pushes both the canvas and the chip row
-           wider than the viewport. Pin the column to 100% and let the grid
-           items shrink. */
+        /* Same column-overflow guard as /. */
         .bowl-main { grid-template-columns: minmax(0, 1fr); }
         .bowl-header,
         .bowl-stage,
@@ -661,20 +603,17 @@ export default function Bowl() {
         .bowl-headerControls,
         .bowl-titleBlock { min-width: 0; }
 
-        /* Mobile portrait: keep all 7 chips on a single row by sizing them
-           with clamp(40px, 11vw, 56px) and using nowrap so they don't fall
-           to a second row. The 40 px floor preserves the touch target. */
         @media (orientation: portrait) and (max-width: 760px) {
           .bowl-header {
             padding: 12px 14px 6px !important;
             flex-wrap: wrap;
             gap: 8px;
           }
-          .bowl-title { font-size: 22px !important; }
+          .bowl-title { font-size: 20px !important; }
           .bowl-subtitle { font-size: 11px !important; }
-          .bowl-headerControls { gap: 12px !important; }
+          .bowl-headerControls { gap: 10px !important; }
           .bowl-headerControls .knob-label { display: none !important; }
-          .bowl-headerControls input[type='range'] { width: 80px !important; }
+          .bowl-headerControls input[type='range'] { width: 76px !important; }
           .bowl-footer {
             padding: 6px 6px 14px !important;
             gap: clamp(2px, 0.8vw, 6px) !important;
@@ -691,8 +630,6 @@ export default function Bowl() {
           .bowl-hotkeys { display: none !important; }
           .bowl-hint { bottom: 14px !important; font-size: 11px !important; }
         }
-        /* Mobile landscape: stage on the left, chips stacked vertically
-           on the right. Same minmax guard on the stage column. */
         @media (orientation: landscape) and (max-height: 500px) {
           .bowl-main {
             grid-template-rows: auto 1fr !important;
@@ -705,9 +642,9 @@ export default function Bowl() {
             flex-wrap: wrap;
             gap: 8px;
           }
-          .bowl-title { font-size: 18px !important; }
+          .bowl-title { font-size: 16px !important; }
           .bowl-subtitle { font-size: 10px !important; }
-          .bowl-headerControls { gap: 12px !important; }
+          .bowl-headerControls { gap: 10px !important; }
           .bowl-headerControls .knob-label { display: none !important; }
           .bowl-headerControls input[type='range'] { width: 72px !important; }
           .bowl-stage { grid-area: stage; }
@@ -779,10 +716,7 @@ function Knob({
         step={0.01}
         value={value}
         onChange={e => onChange(parseFloat(e.target.value))}
-        style={{
-          ...styles.range,
-          accentColor: `hsl(${hue} 70% 65%)`,
-        }}
+        style={{ ...styles.range, accentColor: `hsl(${hue} 70% 65%)` }}
       />
       <span className="knob-value" style={styles.knobValue}>{Math.round(value * 100)}</span>
     </label>
@@ -828,6 +762,17 @@ const styles: Record<string, React.CSSProperties> = {
     gap: 18,
     alignItems: 'center',
   },
+  backLink: {
+    fontSize: 11,
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+    color: 'rgba(255,255,255,0.55)',
+    textDecoration: 'none',
+    border: '1px solid rgba(255,255,255,0.1)',
+    padding: '6px 10px',
+    borderRadius: 999,
+    transition: 'color 0.2s ease, border-color 0.2s ease',
+  },
   stage: {
     position: 'relative',
     minHeight: 0,
@@ -838,7 +783,7 @@ const styles: Record<string, React.CSSProperties> = {
     inset: 0,
     width: '100%',
     height: '100%',
-    cursor: 'crosshair',
+    cursor: 'pointer',
   },
   overlay: {
     position: 'absolute',
@@ -855,13 +800,14 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid rgba(255,255,255,0.08)',
     borderRadius: 14,
     background: 'rgba(20,22,33,0.55)',
+    maxWidth: 320,
   },
   overlayTitle: {
     fontFamily: 'var(--serif, Georgia, serif)',
     fontSize: 32,
     marginBottom: 8,
   },
-  overlayText: { fontSize: 13, color: 'var(--t2, #9399a8)' },
+  overlayText: { fontSize: 13, color: 'var(--t2, #9399a8)', lineHeight: 1.5 },
   hint: {
     position: 'absolute',
     left: 0, right: 0, bottom: 18,
