@@ -622,7 +622,7 @@ export default function Bowl() {
               }}
               title={`${b.name} · ${b.note} · ${b.desc}`}
             >
-              <span style={styles.chipNote}>{b.note}</span>
+              <span className="bowl-chip-note" style={styles.chipNote}>{b.note}</span>
               <span className="bowl-chip-name" style={styles.chipName}>{b.name}</span>
             </button>
           )
@@ -632,37 +632,54 @@ export default function Bowl() {
       <div className="bowl-hotkeys" style={styles.hotkeys}>1–7 selects a bowl · Space strikes</div>
 
       <style jsx global>{`
-        /* Mobile portrait: tighten header + footer, hide chip names, hide hotkeys.
-           The bowl radius is already clamped to ≥ 0.42 × min(viewport) in JS. */
+        /* Without an explicit column template the grid column defaults to
+           'auto' and expands to fit the widest child — on a 390 px iPhone
+           that's the header, which pushes both the canvas and the chip row
+           wider than the viewport. Pin the column to 100% and let the grid
+           items shrink. */
+        .bowl-main { grid-template-columns: minmax(0, 1fr); }
+        .bowl-header,
+        .bowl-stage,
+        .bowl-footer,
+        .bowl-headerControls,
+        .bowl-titleBlock { min-width: 0; }
+
+        /* Mobile portrait: keep all 7 chips on a single row by sizing them
+           with clamp(40px, 11vw, 56px) and using nowrap so they don't fall
+           to a second row. The 40 px floor preserves the touch target. */
         @media (orientation: portrait) and (max-width: 760px) {
           .bowl-header {
-            padding: 14px 16px 6px !important;
+            padding: 12px 14px 6px !important;
             flex-wrap: wrap;
-            gap: 10px;
+            gap: 8px;
           }
           .bowl-title { font-size: 22px !important; }
           .bowl-subtitle { font-size: 11px !important; }
-          .bowl-headerControls { gap: 14px !important; }
+          .bowl-headerControls { gap: 12px !important; }
           .bowl-headerControls .knob-label { display: none !important; }
-          .bowl-headerControls input[type='range'] { width: 84px !important; }
+          .bowl-headerControls input[type='range'] { width: 80px !important; }
           .bowl-footer {
-            padding: 8px 10px 18px !important;
-            gap: 8px !important;
+            padding: 6px 6px 14px !important;
+            gap: clamp(2px, 0.8vw, 6px) !important;
             justify-content: center !important;
+            flex-wrap: nowrap !important;
           }
           .bowl-chip {
-            width: 50px !important;
-            height: 50px !important;
+            width: clamp(40px, 11vw, 56px) !important;
+            height: clamp(40px, 11vw, 56px) !important;
+            flex: 0 0 auto;
           }
+          .bowl-chip-note { font-size: clamp(16px, 4.6vw, 22px) !important; }
           .bowl-chip-name { display: none !important; }
           .bowl-hotkeys { display: none !important; }
           .bowl-hint { bottom: 14px !important; font-size: 11px !important; }
         }
-        /* Mobile landscape: bowl centered in left stage, note buttons stack on the right. */
+        /* Mobile landscape: stage on the left, chips stacked vertically
+           on the right. Same minmax guard on the stage column. */
         @media (orientation: landscape) and (max-height: 500px) {
           .bowl-main {
             grid-template-rows: auto 1fr !important;
-            grid-template-columns: 1fr auto !important;
+            grid-template-columns: minmax(0, 1fr) auto !important;
             grid-template-areas: 'header header' 'stage footer' !important;
           }
           .bowl-header {
@@ -689,6 +706,7 @@ export default function Bowl() {
           .bowl-chip {
             width: 44px !important;
             height: 44px !important;
+            flex: 0 0 auto;
           }
           .bowl-chip-name { display: none !important; }
           .bowl-hotkeys { display: none !important; }
