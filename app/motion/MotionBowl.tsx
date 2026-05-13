@@ -197,30 +197,42 @@ export default function MotionBowl() {
     return D && typeof D.requestPermission === 'function'
   }, [])
 
-  const requestMotion = useCallback(async (): Promise<MotionStatus> => {
-    if (typeof window === 'undefined' || typeof (window as any).DeviceOrientationEvent === 'undefined') {
-      return 'unavailable'
-    }
+  // iOS gates DeviceOrientationEvent.requestPermission() on a live user
+  // gesture. Awaiting *anything* before the call drops us out of that
+  // gesture window and iOS silently resolves the promise to "denied"
+  // without even showing the prompt — so we must kick the promise off
+  // synchronously, BEFORE any await.
+  const kickMotionRequest = useCallback((): Promise<MotionStatus> => {
+    if (typeof window === 'undefined') return Promise.resolve('unavailable')
     const D: any = (window as any).DeviceOrientationEvent
-    if (typeof D.requestPermission === 'function') {
-      try {
-        const result = await D.requestPermission()
-        return result === 'granted' ? 'granted' : 'denied'
-      } catch {
-        return 'denied'
-      }
+    if (!D) return Promise.resolve('unavailable')
+    if (typeof D.requestPermission !== 'function') return Promise.resolve('granted')
+    try {
+      return D.requestPermission()
+        .then((r: string) => (r === 'granted' ? 'granted' : 'denied') as MotionStatus)
+        .catch(() => 'denied' as MotionStatus)
+    } catch {
+      return Promise.resolve('denied')
     }
-    return 'granted'
   }, [])
+
+  const retryMotion = useCallback((e: React.PointerEvent | React.MouseEvent) => {
+    e.preventDefault()
+    // Synchronous kick from the user gesture.
+    const p = kickMotionRequest()
+    p.then(setMotion)
+  }, [kickMotionRequest])
 
   const ensureStarted = useCallback(async () => {
     if (!engineRef.current) engineRef.current = new BowlEngine()
-    await engineRef.current.resume()
+    // Kick BOTH off synchronously to preserve the user gesture for iOS.
+    const resumePromise = engineRef.current.resume()
+    const motionPromise = kickMotionRequest()
+    await resumePromise
     if (!engineRef.current.voice) engineRef.current.loadBowl(bowl.freq)
-    const next = await requestMotion()
-    setMotion(next)
     setStarted(true)
-  }, [bowl.freq, requestMotion])
+    setMotion(await motionPromise)
+  }, [bowl.freq, kickMotionRequest])
 
   useEffect(() => {
     if (!started) return
@@ -514,7 +526,6 @@ export default function MotionBowl() {
   const statusLine = (() => {
     if (!started) return null
     if (motion === 'granted') return null
-    if (motion === 'denied') return 'Motion access blocked — tap the bowl to strike.'
     if (motion === 'unavailable') return 'No motion sensor — tap the bowl to strike.'
     return null
   })()
@@ -555,6 +566,16 @@ export default function MotionBowl() {
         )}
         {statusLine && (
           <div className="bowl-hint" style={styles.hint}>{statusLine}</div>
+        )}
+        {started && motion === 'denied' && needsExplicitPermission && (
+          <button
+            type="button"
+            className="bowl-motion-retry"
+            onPointerDown={retryMotion}
+            style={styles.retryBtn}
+          >
+            Tap to allow motion access
+          </button>
         )}
         <div style={styles.meter} aria-hidden>
           <div
@@ -884,6 +905,23 @@ const styles: Record<string, React.CSSProperties> = {
     width: 26,
     textAlign: 'right',
     color: 'var(--t1, #e4e5ea)',
+  },
+  retryBtn: {
+    position: 'absolute',
+    left: '50%',
+    transform: 'translateX(-50%)',
+    bottom: 36,
+    padding: '10px 18px',
+    borderRadius: 999,
+    border: '1px solid rgba(216, 178, 96, 0.55)',
+    background: 'rgba(20, 22, 33, 0.65)',
+    color: '#d8b260',
+    fontSize: 12,
+    letterSpacing: 0.4,
+    cursor: 'pointer',
+    backdropFilter: 'blur(8px)',
+    WebkitBackdropFilter: 'blur(8px)',
+    pointerEvents: 'auto',
   },
   hotkeys: {
     position: 'absolute',
