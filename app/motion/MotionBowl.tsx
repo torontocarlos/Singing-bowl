@@ -172,10 +172,12 @@ export default function MotionBowl() {
   const [motion, setMotion] = useState<MotionStatus>('idle')
   const [intensityDisplay, setIntensityDisplay] = useState(0)
   const [hint, setHint] = useState(true)
+  const [showDebug, setShowDebug] = useState(true)
 
   const engineRef = useRef<BowlEngine | null>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const rafRef = useRef<number | null>(null)
+  const debugRef = useRef<HTMLDivElement>(null)
 
   const bowl = BOWLS[bowlIdx]
   const hue = bowl.hue
@@ -197,7 +199,20 @@ export default function MotionBowl() {
     })),
     hue,
     motionLive: false,        // becomes true once at least one orientation event has been received
+    // Debug telemetry
+    lastMotionTs: 0,          // performance.now() of last devicemotion event
+    lastOrientTs: 0,          // performance.now() of last deviceorientation event
+    motionCount: 0,
+    orientCount: 0,
+    rateAlpha: 0,
+    rateBeta: 0,
+    rateGamma: 0,
+    rawAlpha: null as number | null,
+    rawCompass: null as number | null,
+    motionState: 'idle' as MotionStatus,
   })
+
+  useEffect(() => { stateRef.current.motionState = motion }, [motion])
 
   useEffect(() => { stateRef.current.hue = hue }, [hue])
 
@@ -336,13 +351,18 @@ export default function MotionBowl() {
     if (typeof window === 'undefined') return
 
     const onMotion = (e: DeviceMotionEvent) => {
-      const r = e.rotationRate
-      if (!r) return
       const s = stateRef.current
       const now = performance.now()
+      s.lastMotionTs = now
+      s.motionCount++
+      const r = e.rotationRate
+      if (!r) return
       const a = Math.abs(r.alpha ?? 0)
       const b = Math.abs(r.beta ?? 0)
       const g = Math.abs(r.gamma ?? 0)
+      s.rateAlpha = a
+      s.rateBeta = b
+      s.rateGamma = g
       const angVel = Math.max(a, b, g) // deg/s, dominant axis
       if (angVel > 0) s.motionLive = true
       s.speed = s.speed * 0.7 + angVel * 0.3
@@ -359,13 +379,17 @@ export default function MotionBowl() {
     }
 
     const onOrient = (e: DeviceOrientationEvent & { webkitCompassHeading?: number }) => {
+      const s = stateRef.current
+      s.lastOrientTs = performance.now()
+      s.orientCount++
+      s.rawAlpha = e.alpha
+      s.rawCompass = typeof e.webkitCompassHeading === 'number' ? e.webkitCompassHeading : null
       // iOS often reports null alpha but provides webkitCompassHeading.
       let a = e.alpha
       if (a == null && typeof e.webkitCompassHeading === 'number') {
         a = e.webkitCompassHeading
       }
       if (a == null) return
-      const s = stateRef.current
       s.alphaDeg = a
       s.motionLive = true
     }
@@ -409,6 +433,21 @@ export default function MotionBowl() {
       }
 
       setIntensityDisplay(s.intensity)
+
+      if (debugRef.current) {
+        const fmt = (n: number, d = 1) => n.toFixed(d).padStart(6)
+        const since = (ts: number) => ts === 0 ? 'never' : Math.round(now - ts) + 'ms'
+        debugRef.current.textContent =
+          'motion: ' + s.motionState +
+          '\nDM evt: ' + s.motionCount + '  (last ' + since(s.lastMotionTs) + ')' +
+          '\nDO evt: ' + s.orientCount + '  (last ' + since(s.lastOrientTs) + ')' +
+          '\nrate (deg/s)  α' + fmt(s.rateAlpha) + ' β' + fmt(s.rateBeta) + ' γ' + fmt(s.rateGamma) +
+          '\nspeed: ' + fmt(s.speed) + '  target: ' + fmt(s.targetIntensity, 3) +
+          '\nintensity: ' + fmt(s.intensity, 3) +
+          '\nvoice gain: ' + fmt(engineRef.current?.voice?.currentLevel() ?? 0, 3) +
+          '\nalpha raw: ' + (s.rawAlpha == null ? 'null' : s.rawAlpha.toFixed(1) + '°') +
+          '   compass: ' + (s.rawCompass == null ? 'n/a' : s.rawCompass.toFixed(1) + '°')
+      }
 
       // ---- Render ----
       const w = cvs.clientWidth, h = cvs.clientHeight
@@ -587,6 +626,15 @@ export default function MotionBowl() {
         </div>
         <div className="bowl-headerControls" style={styles.headerControls}>
           <a href="/" style={styles.backLink} aria-label="Back to finger-controlled bowl">↺ Finger</a>
+          <button
+            type="button"
+            onClick={() => setShowDebug(s => !s)}
+            style={{ ...styles.backLink, color: showDebug ? '#d8b260' : 'rgba(255,255,255,0.55)' }}
+            aria-label="Toggle motion debug overlay"
+            title="Toggle motion debug overlay"
+          >
+            🐛 Debug
+          </button>
           <Knob label="Reverb" value={reverb} onChange={setReverb} hue={hue} />
           <Knob label="Volume" value={volume} onChange={setVolume} hue={hue} />
         </div>
@@ -594,6 +642,9 @@ export default function MotionBowl() {
 
       <div className="bowl-stage" style={styles.stage}>
         <canvas ref={canvasRef} className="bowl-canvas" style={styles.canvas} />
+        {showDebug && (
+          <div ref={debugRef} className="motion-debug" style={styles.debug} aria-hidden />
+        )}
         {!started && (
           <div style={styles.overlay} onPointerDown={ensureStarted}>
             <div style={styles.overlayInner}>
@@ -948,6 +999,25 @@ const styles: Record<string, React.CSSProperties> = {
     width: 26,
     textAlign: 'right',
     color: 'var(--t1, #e4e5ea)',
+  },
+  debug: {
+    position: 'absolute',
+    top: 10,
+    left: 10,
+    padding: '8px 10px',
+    borderRadius: 8,
+    background: 'rgba(0, 0, 0, 0.55)',
+    border: '1px solid rgba(216, 178, 96, 0.25)',
+    color: '#e4e5ea',
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+    fontSize: 10.5,
+    lineHeight: 1.45,
+    whiteSpace: 'pre',
+    pointerEvents: 'none',
+    backdropFilter: 'blur(4px)',
+    WebkitBackdropFilter: 'blur(4px)',
+    maxWidth: 'calc(100vw - 24px)',
+    zIndex: 4,
   },
   retryBtn: {
     position: 'absolute',
