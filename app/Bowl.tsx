@@ -10,7 +10,7 @@ type BowlCfg = {
   desc: string
 }
 
-const BOWLS: BowlCfg[] = [
+const BASE_BOWLS: BowlCfg[] = [
   { name: 'Root',      note: 'C', freq: 130.81, hue: 14,  desc: 'Earth · Grounding' },
   { name: 'Sacral',    note: 'D', freq: 146.83, hue: 28,  desc: 'Water · Flow' },
   { name: 'Solar',     note: 'E', freq: 164.81, hue: 45,  desc: 'Fire · Will' },
@@ -18,6 +18,18 @@ const BOWLS: BowlCfg[] = [
   { name: 'Throat',    note: 'G', freq: 196.00, hue: 195, desc: 'Sound · Truth' },
   { name: 'Third Eye', note: 'A', freq: 220.00, hue: 250, desc: 'Light · Insight' },
   { name: 'Crown',     note: 'B', freq: 246.94, hue: 285, desc: 'Thought · Unity' },
+]
+
+// Lower row of 7 = base octave, upper row of 7 = one octave higher.
+// Together they give a full two-octave chromatic-of-the-chakras range.
+const BOWLS: BowlCfg[] = [
+  ...BASE_BOWLS,
+  ...BASE_BOWLS.map(b => ({
+    ...b,
+    note: b.note + '↑',
+    freq: b.freq * 2,
+    desc: b.desc + ' · octave',
+  })),
 ]
 
 class BowlVoice {
@@ -573,11 +585,15 @@ export default function Bowl() {
     engineRef.current?.voice?.stop()
   }, [])
 
-  // Keyboard: 1..7 picks a bowl, space strikes
+  // Keyboard: 1..7 picks low octave, Shift+1..7 picks high octave, space strikes.
   useEffect(() => {
     const onKey = async (e: KeyboardEvent) => {
       if (e.key >= '1' && e.key <= '7') {
         setBowlIdx(parseInt(e.key, 10) - 1)
+      } else if (e.shiftKey && '!@#$%^&'.includes(e.key)) {
+        // Shift + 1..7 produces these symbols on a US keyboard layout.
+        const idx = '!@#$%^&'.indexOf(e.key)
+        if (idx >= 0) setBowlIdx(7 + idx)
       } else if (e.code === 'Space') {
         e.preventDefault()
         await ensureStarted()
@@ -684,7 +700,10 @@ export default function Bowl() {
                 boxShadow: active
                   ? `0 0 24px hsla(${b.hue}, 80%, 55%, 0.55), inset 0 0 12px hsla(${b.hue}, 80%, 55%, 0.3)`
                   : '0 1px 0 rgba(255,255,255,0.04) inset',
-                background: `radial-gradient(circle at 30% 25%, hsl(${b.hue} 50% 55%), hsl(${b.hue} 60% 18%))`,
+                // High-octave row reads as lighter / "brighter pitch".
+                background: i < 7
+                  ? `radial-gradient(circle at 30% 25%, hsl(${b.hue} 50% 55%), hsl(${b.hue} 60% 18%))`
+                  : `radial-gradient(circle at 30% 25%, hsl(${b.hue} 65% 75%), hsl(${b.hue} 70% 34%))`,
               }}
               title={`${b.name} · ${b.note} · ${b.desc}`}
             >
@@ -695,7 +714,9 @@ export default function Bowl() {
         })}
       </footer>
 
-      <div className="bowl-hotkeys" style={styles.hotkeys}>1–7 selects a bowl · Space strikes</div>
+      <div className="bowl-hotkeys" style={styles.hotkeys}>
+        1–7 picks low row · Shift+1–7 picks high row · Space strikes · tap chips to layer chords
+      </div>
 
       <style jsx global>{`
         /* Without an explicit column template the grid column defaults to
@@ -728,12 +749,13 @@ export default function Bowl() {
             padding: 6px 6px 14px !important;
             gap: clamp(2px, 0.8vw, 6px) !important;
             justify-content: center !important;
-            flex-wrap: nowrap !important;
+            /* 7-column grid fills row-by-row, so the 14 chips become a
+               clean two-row keyboard (low octave on top, high below). */
+            grid-template-columns: repeat(7, auto) !important;
           }
           .bowl-chip {
             width: clamp(40px, 11vw, 56px) !important;
             height: clamp(40px, 11vw, 56px) !important;
-            flex: 0 0 auto;
           }
           .bowl-chip-note { font-size: clamp(16px, 4.6vw, 22px) !important; }
           .bowl-chip-name { display: none !important; }
@@ -762,17 +784,20 @@ export default function Bowl() {
           .bowl-stage { grid-area: stage; }
           .bowl-footer {
             grid-area: footer;
-            flex-direction: column !important;
-            flex-wrap: nowrap !important;
+            /* Two columns of 7: low octave column on the left of the
+               rail, high octave on the right. grid-auto-flow:column
+               fills the first column top-to-bottom first. */
+            grid-template-columns: auto auto !important;
+            grid-template-rows: repeat(7, auto) !important;
+            grid-auto-flow: column !important;
             padding: 4px 10px 4px 4px !important;
             gap: 6px !important;
             justify-content: center !important;
             align-items: center;
           }
           .bowl-chip {
-            width: 44px !important;
-            height: 44px !important;
-            flex: 0 0 auto;
+            width: 40px !important;
+            height: 40px !important;
           }
           .bowl-chip-name { display: none !important; }
           .bowl-hotkeys { display: none !important; }
@@ -937,11 +962,15 @@ const styles: Record<string, React.CSSProperties> = {
     transition: 'width 80ms linear',
   },
   footer: {
-    display: 'flex',
+    // Grid keeps the chips in exactly two rows of 7 (low octave on top,
+    // high octave below) at every viewport. Mobile-landscape CSS flips
+    // this to two columns of 7 on the side.
+    display: 'grid',
+    gridTemplateColumns: 'repeat(7, auto)',
+    justifyContent: 'center',
+    alignContent: 'center',
     gap: 10,
     padding: '14px 24px 22px',
-    justifyContent: 'center',
-    flexWrap: 'wrap',
   },
   bowlChip: {
     width: 70,
