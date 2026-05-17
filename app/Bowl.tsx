@@ -105,6 +105,16 @@ class BowlEngine {
   voice: BowlVoice | null = null
 
   constructor() {
+    // iOS Safari 17.4+: opt into the "playback" audio category so the
+    // hardware silent switch / Control Center mute doesn't silence us
+    // through the built-in speaker. Bluetooth output ignores the switch
+    // anyway, which is why it sounded fine there.
+    try {
+      const ns: any = (typeof navigator !== 'undefined') ? (navigator as any) : null
+      if (ns && ns.audioSession && typeof ns.audioSession === 'object') {
+        ns.audioSession.type = 'playback'
+      }
+    } catch {}
     const Ctor: typeof AudioContext =
       (window as any).AudioContext || (window as any).webkitAudioContext
     this.ctx = new Ctor()
