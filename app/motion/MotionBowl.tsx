@@ -207,23 +207,38 @@ export default function MotionBowl() {
     return D && typeof D.requestPermission === 'function'
   }, [])
 
-  // iOS gates DeviceOrientationEvent.requestPermission() on a live user
-  // gesture. Awaiting *anything* before the call drops us out of that
-  // gesture window and iOS silently resolves the promise to "denied"
-  // without even showing the prompt — so we must kick the promise off
-  // synchronously, BEFORE any await.
+  // iOS gates DeviceOrientationEvent.requestPermission() / DeviceMotionEvent
+  // .requestPermission() on a live user gesture. Awaiting *anything* before
+  // either call drops us out of the gesture window and iOS silently resolves
+  // the promise to "denied" without showing the prompt — so we must kick
+  // both promises off synchronously, BEFORE any await.
+  //
+  // We request DeviceMotionEvent permission too because /motion's intensity
+  // is driven by DeviceMotionEvent.rotationRate; on some iOS versions the
+  // two events have separate permission grants.
   const kickMotionRequest = useCallback((): Promise<MotionStatus> => {
     if (typeof window === 'undefined') return Promise.resolve('unavailable')
-    const D: any = (window as any).DeviceOrientationEvent
-    if (!D) return Promise.resolve('unavailable')
-    if (typeof D.requestPermission !== 'function') return Promise.resolve('granted')
+    const DO: any = (window as any).DeviceOrientationEvent
+    const DM: any = (window as any).DeviceMotionEvent
+    if (!DO && !DM) return Promise.resolve('unavailable')
+    const needsPerm =
+      (DO && typeof DO.requestPermission === 'function') ||
+      (DM && typeof DM.requestPermission === 'function')
+    if (!needsPerm) return Promise.resolve('granted')
+    const promises: Promise<string>[] = []
     try {
-      return D.requestPermission()
-        .then((r: string) => (r === 'granted' ? 'granted' : 'denied') as MotionStatus)
-        .catch(() => 'denied' as MotionStatus)
+      if (DO && typeof DO.requestPermission === 'function') {
+        promises.push(DO.requestPermission().catch(() => 'denied'))
+      }
+      if (DM && typeof DM.requestPermission === 'function') {
+        promises.push(DM.requestPermission().catch(() => 'denied'))
+      }
     } catch {
       return Promise.resolve('denied')
     }
+    return Promise.all(promises).then(rs =>
+      rs.every(r => r === 'granted') ? 'granted' : 'denied'
+    )
   }, [])
 
   const retryMotion = useCallback((e: React.PointerEvent | React.MouseEvent) => {
@@ -305,35 +320,37 @@ export default function MotionBowl() {
     return () => cvs.removeEventListener('pointerdown', onDown)
   }, [ensureStarted, started])
 
-  // Device orientation -> rotation-rate-driven intensity
+  // Phone motion -> intensity.
+  //
+  // Primary: DeviceMotionEvent.rotationRate gives angular velocity in deg/s
+  // directly, with no need for derivatives or magnetometer calibration.
+  // It's both more reliable and lower-latency than deriving it from
+  // DeviceOrientationEvent.alpha (which is null on iOS without compass
+  // calibration).
+  //
+  // Secondary: DeviceOrientationEvent for the mallet position (compass
+  // heading). On iOS Safari `e.alpha` can be null even when permission is
+  // granted — fall back to `e.webkitCompassHeading`.
   useEffect(() => {
     if (!started || motion !== 'granted') return
     if (typeof window === 'undefined') return
 
-    const onOrient = (e: DeviceOrientationEvent) => {
-      const a = e.alpha
-      if (a == null) return
+    const onMotion = (e: DeviceMotionEvent) => {
+      const r = e.rotationRate
+      if (!r) return
       const s = stateRef.current
       const now = performance.now()
-      s.alphaDeg = a
-      s.motionLive = true
-      if (s.lastAlpha == null) {
-        s.lastAlpha = a
-        s.lastT = now
-        return
-      }
-      const dt = Math.max(1, now - s.lastT) / 1000
-      let da = a - s.lastAlpha
-      if (da > 180) da -= 360
-      if (da < -180) da += 360
-      const angVel = Math.abs(da) / dt
+      const a = Math.abs(r.alpha ?? 0)
+      const b = Math.abs(r.beta ?? 0)
+      const g = Math.abs(r.gamma ?? 0)
+      const angVel = Math.max(a, b, g) // deg/s, dominant axis
+      if (angVel > 0) s.motionLive = true
       s.speed = s.speed * 0.7 + angVel * 0.3
       // 20 deg/s -> silent, ~260 deg/s -> max
       s.targetIntensity = Math.min(1, Math.max(0, (s.speed - 20) / 240))
-      s.lastAlpha = a
       s.lastT = now
       if (Math.random() < 0.18 + s.targetIntensity * 0.45) {
-        const ang = (a - 90) * Math.PI / 180
+        const ang = (s.alphaDeg - 90) * Math.PI / 180
         const x = s.cx + Math.cos(ang) * s.radius
         const y = s.cy + Math.sin(ang) * s.radius
         s.ripples.push({ x, y, r: 4, alpha: 0.7, hue: s.hue })
@@ -341,8 +358,24 @@ export default function MotionBowl() {
       }
     }
 
+    const onOrient = (e: DeviceOrientationEvent & { webkitCompassHeading?: number }) => {
+      // iOS often reports null alpha but provides webkitCompassHeading.
+      let a = e.alpha
+      if (a == null && typeof e.webkitCompassHeading === 'number') {
+        a = e.webkitCompassHeading
+      }
+      if (a == null) return
+      const s = stateRef.current
+      s.alphaDeg = a
+      s.motionLive = true
+    }
+
+    window.addEventListener('devicemotion', onMotion)
     window.addEventListener('deviceorientation', onOrient)
-    return () => window.removeEventListener('deviceorientation', onOrient)
+    return () => {
+      window.removeEventListener('devicemotion', onMotion)
+      window.removeEventListener('deviceorientation', onOrient)
+    }
   }, [started, motion])
 
   // Animation + audio level loop
