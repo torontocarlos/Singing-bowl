@@ -76,7 +76,7 @@ class BowlVoice {
     this.master.gain.cancelScheduledValues(now)
     const cur = Math.max(this.master.gain.value, 0.0001)
     this.master.gain.setValueAtTime(Math.min(cur + power, 1.2), now)
-    this.master.gain.exponentialRampToValueAtTime(0.0001, now + 9)
+    this.master.gain.exponentialRampToValueAtTime(0.0001, now + 6)
   }
 
   currentLevel() {
@@ -102,7 +102,9 @@ class BowlEngine {
   dry: GainNode
   reverb: ConvolverNode
   reverbGain: GainNode
-  voice: BowlVoice | null = null
+  voice: BowlVoice | null = null   // sustained voice for rim tracing
+  transients: BowlVoice[] = []     // independent struck voices so multiple bells can ring at once
+  private static MAX_TRANSIENTS = 8
 
   constructor() {
     // iOS Safari 17.4+: opt into the "playback" audio category so the
@@ -125,7 +127,7 @@ class BowlEngine {
     this.reverbGain = this.ctx.createGain()
     this.reverbGain.gain.value = 0.45
     this.reverb = this.ctx.createConvolver()
-    this.reverb.buffer = this.makeImpulse(5, 2.6)
+    this.reverb.buffer = this.makeImpulse(3.5, 2.6)
     this.dry.connect(this.master)
     this.reverb.connect(this.reverbGain).connect(this.master)
     this.master.connect(this.ctx.destination)
@@ -147,6 +149,30 @@ class BowlEngine {
   loadBowl(freq: number) {
     if (this.voice) this.voice.stop()
     this.voice = new BowlVoice(this.ctx, freq, [this.dry, this.reverb])
+  }
+
+  // Spawn an independent transient struck voice. Lets multiple bells ring
+  // together (chords) without one strike cutting off the previous one.
+  // Caps active transients so rapid taps don't pile up oscillators.
+  strikeNote(freq: number, power = 0.6) {
+    if (this.transients.length >= BowlEngine.MAX_TRANSIENTS) {
+      const oldest = this.transients.shift()
+      try { oldest?.stop() } catch {}
+    }
+    const v = new BowlVoice(this.ctx, freq, [this.dry, this.reverb])
+    v.strike(power)
+    this.transients.push(v)
+    // Strike envelope is 6 s; clean up shortly after to free oscillators.
+    window.setTimeout(() => {
+      try { v.stop() } catch {}
+      const i = this.transients.indexOf(v)
+      if (i >= 0) this.transients.splice(i, 1)
+    }, 6800)
+  }
+
+  stopAllTransients() {
+    for (const v of this.transients) { try { v.stop() } catch {} }
+    this.transients = []
   }
 
   setReverb(amount: number) {
@@ -276,8 +302,9 @@ export default function Bowl() {
       cvs.setPointerCapture(e.pointerId)
       await ensureStarted()
       if (dist < inner) {
-        // Strike the bowl
-        engineRef.current?.voice?.strike(0.6)
+        // Strike the bowl as an independent transient voice so prior
+        // strikes (other notes) keep ringing — enables chord-building.
+        engineRef.current?.strikeNote(bowl.freq, 0.6)
         spawnRipple(x, y, true)
         s.glowPulse = 1
         return
@@ -351,7 +378,7 @@ export default function Bowl() {
       cvs.removeEventListener('pointercancel', onUp)
       cvs.removeEventListener('pointerleave', onLeave)
     }
-  }, [ensureStarted])
+  }, [ensureStarted, bowl.freq])
 
   const spawnRipple = (x: number, y: number, big = false) => {
     const s = stateRef.current
@@ -541,7 +568,10 @@ export default function Bowl() {
   }, [])
 
   // Cleanup on unmount
-  useEffect(() => () => { engineRef.current?.voice?.stop() }, [])
+  useEffect(() => () => {
+    engineRef.current?.stopAllTransients()
+    engineRef.current?.voice?.stop()
+  }, [])
 
   // Keyboard: 1..7 picks a bowl, space strikes
   useEffect(() => {
@@ -551,14 +581,14 @@ export default function Bowl() {
       } else if (e.code === 'Space') {
         e.preventDefault()
         await ensureStarted()
-        engineRef.current?.voice?.strike(0.6)
+        engineRef.current?.strikeNote(bowl.freq, 0.6)
         const s = stateRef.current
         s.glowPulse = 1
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [ensureStarted])
+  }, [ensureStarted, bowl.freq])
 
   const cssHue = useMemo(() => `hsl(${hue} 70% 65%)`, [hue])
 
@@ -638,7 +668,16 @@ export default function Bowl() {
             <button
               key={b.note}
               className={`bowl-chip${active ? ' is-active' : ''}`}
-              onClick={async () => { setBowlIdx(i); await ensureStarted() }}
+              onClick={async () => {
+                setBowlIdx(i)
+                await ensureStarted()
+                // Strike the tapped chip's note as an independent transient
+                // so prior bells keep ringing — tap several chips to build a
+                // chord. The chip also becomes the selected (highlighted)
+                // bowl for the rim-tracing sustained voice.
+                engineRef.current?.strikeNote(b.freq, 0.55)
+                stateRef.current.glowPulse = 1
+              }}
               style={{
                 ...styles.bowlChip,
                 borderColor: active ? `hsl(${b.hue} 70% 60%)` : 'transparent',
