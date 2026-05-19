@@ -20,8 +20,6 @@ const BASE_BOWLS: BowlCfg[] = [
   { name: 'Crown',     note: 'B', freq: 246.94, hue: 285, desc: 'Thought · Unity' },
 ]
 
-// Lower row of 7 = base octave, upper row of 7 = one octave higher.
-// Together they give a full two-octave chromatic-of-the-chakras range.
 const BOWLS: BowlCfg[] = [
   ...BASE_BOWLS,
   ...BASE_BOWLS.map(b => ({
@@ -53,9 +51,6 @@ class BowlVoice {
     this.vibrato.connect(this.vibratoGain)
     this.vibrato.start()
 
-    // Inharmonic partials approximate a real singing bowl's spectrum.
-    // The slight detune between paired oscillators creates the
-    // characteristic shimmering beat tone.
     const ratios = [1.0, 2.76, 5.40, 8.93, 13.34]
     const amps   = [1.0, 0.55, 0.28, 0.14, 0.07]
     const beats  = [0.4, 1.2, 2.0, 2.8, 3.6]
@@ -114,15 +109,13 @@ class BowlEngine {
   dry: GainNode
   reverb: ConvolverNode
   reverbGain: GainNode
-  voice: BowlVoice | null = null   // sustained voice for rim tracing
-  transients: BowlVoice[] = []     // independent struck voices so multiple bells can ring at once
+  voice: BowlVoice | null = null
+  transients: BowlVoice[] = []
   private static MAX_TRANSIENTS = 8
 
   constructor() {
-    // iOS Safari 17.4+: opt into the "playback" audio category so the
-    // hardware silent switch / Control Center mute doesn't silence us
-    // through the built-in speaker. Bluetooth output ignores the switch
-    // anyway, which is why it sounded fine there.
+    // iOS speaker fix; will be overridden to 'play-and-record' once the
+    // mic stream is granted.
     try {
       const ns: any = (typeof navigator !== 'undefined') ? (navigator as any) : null
       if (ns && ns.audioSession && typeof ns.audioSession === 'object') {
@@ -163,9 +156,6 @@ class BowlEngine {
     this.voice = new BowlVoice(this.ctx, freq, [this.dry, this.reverb])
   }
 
-  // Spawn an independent transient struck voice. Lets multiple bells ring
-  // together (chords) without one strike cutting off the previous one.
-  // Caps active transients so rapid taps don't pile up oscillators.
   strikeNote(freq: number, power = 0.6) {
     if (this.transients.length >= BowlEngine.MAX_TRANSIENTS) {
       const oldest = this.transients.shift()
@@ -174,7 +164,6 @@ class BowlEngine {
     const v = new BowlVoice(this.ctx, freq, [this.dry, this.reverb])
     v.strike(power)
     this.transients.push(v)
-    // Strike envelope is 6 s; clean up shortly after to free oscillators.
     window.setTimeout(() => {
       try { v.stop() } catch {}
       const i = this.transients.indexOf(v)
@@ -203,61 +192,127 @@ class BowlEngine {
 }
 
 type Ripple = { x: number; y: number; r: number; alpha: number; hue: number }
-type Trail  = { x: number; y: number; t: number }
+type MicStatus = 'idle' | 'granted' | 'denied' | 'unavailable'
 
-export default function Bowl() {
+export default function BreathBowl() {
   const [bowlIdx, setBowlIdx] = useState(5)
   const [reverb, setReverb] = useState(0.45)
   const [volume, setVolume] = useState(0.75)
   const [started, setStarted] = useState(false)
+  const [mic, setMic] = useState<MicStatus>('idle')
   const [intensityDisplay, setIntensityDisplay] = useState(0)
   const [hint, setHint] = useState(true)
 
   const engineRef = useRef<BowlEngine | null>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const rafRef = useRef<number | null>(null)
+  const analyserRef = useRef<AnalyserNode | null>(null)
+  const streamRef = useRef<MediaStream | null>(null)
+  const analyserBufRef = useRef<Float32Array | null>(null)
 
   const bowl = BOWLS[bowlIdx]
   const hue = bowl.hue
 
   const stateRef = useRef({
     cx: 0, cy: 0, radius: 0,
-    pointerActive: false,
-    pointerOnRim: false,
-    pointerX: 0, pointerY: 0,
-    lastAngle: 0,
-    lastT: 0,
-    speed: 0,
-    intensity: 0,
+    level: 0,                 // smoothed mic RMS
+    micRms: 0,                // raw RMS from analyser
     targetIntensity: 0,
+    intensity: 0,
+    glowPulse: 0,
     ripples: [] as Ripple[],
-    trails: [] as Trail[],
     sparks: Array.from({ length: 56 }, (_, i) => ({
       angle: (i / 56) * Math.PI * 2,
       phase: Math.random() * Math.PI * 2,
       r: 0,
     })),
     hue,
-    glowPulse: 0,
+    micState: 'idle' as MicStatus,
   })
 
-  // keep hue current for the animation loop
   useEffect(() => { stateRef.current.hue = hue }, [hue])
+  useEffect(() => { stateRef.current.micState = mic }, [mic])
+
+  const needsExplicitPermission = useMemo(() => {
+    if (typeof navigator === 'undefined') return false
+    return !!navigator.mediaDevices?.getUserMedia
+  }, [])
+
+  // iOS gates getUserMedia on a live user gesture (like motion). We kick
+  // the promise synchronously to preserve the gesture window, then await
+  // the result later.
+  const kickMicRequest = useCallback((audioCtx: AudioContext): Promise<{
+    status: MicStatus
+    analyser?: AnalyserNode
+    stream?: MediaStream
+  }> => {
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+      return Promise.resolve({ status: 'unavailable' })
+    }
+    return navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+      },
+    })
+      .then(stream => {
+        const source = audioCtx.createMediaStreamSource(stream)
+        const analyser = audioCtx.createAnalyser()
+        analyser.fftSize = 256
+        analyser.smoothingTimeConstant = 0.3
+        source.connect(analyser)
+        // Intentionally NOT connecting analyser -> destination: that would
+        // create a feedback loop. Analyser is read-only.
+        return { status: 'granted' as MicStatus, analyser, stream }
+      })
+      .catch(() => ({ status: 'denied' as MicStatus }))
+  }, [])
+
+  const attachMicResult = useCallback((result: { status: MicStatus; analyser?: AnalyserNode; stream?: MediaStream }) => {
+    if (result.status === 'granted' && result.analyser) {
+      try { analyserRef.current?.disconnect() } catch {}
+      try { streamRef.current?.getTracks().forEach(t => t.stop()) } catch {}
+      analyserRef.current = result.analyser
+      streamRef.current = result.stream || null
+      analyserBufRef.current = new Float32Array(result.analyser.fftSize)
+      // iOS routes audio to the earpiece when the page is recording. Tell
+      // the OS we're doing both so it picks the right category.
+      try {
+        const ns: any = navigator
+        if (ns?.audioSession) ns.audioSession.type = 'play-and-record'
+      } catch {}
+    }
+    setMic(result.status)
+  }, [])
+
+  const retryMic = useCallback((e: React.PointerEvent | React.MouseEvent) => {
+    e.preventDefault()
+    if (!engineRef.current) return
+    const p = kickMicRequest(engineRef.current.ctx)
+    p.then(attachMicResult)
+  }, [kickMicRequest, attachMicResult])
 
   const ensureStarted = useCallback(async () => {
     if (!engineRef.current) engineRef.current = new BowlEngine()
-    await engineRef.current.resume()
-    if (!engineRef.current.voice) engineRef.current.loadBowl(bowl.freq)
+    const engine = engineRef.current
+    // Kick both off synchronously inside the user gesture so iOS keeps
+    // its activation state for both calls.
+    const resumePromise = engine.resume()
+    const micPromise = kickMicRequest(engine.ctx)
+    await resumePromise
+    if (!engine.voice) engine.loadBowl(bowl.freq)
     setStarted(true)
-  }, [bowl.freq])
+    const result = await micPromise
+    attachMicResult(result)
+  }, [bowl.freq, kickMicRequest, attachMicResult])
 
   useEffect(() => {
     if (!started) return
-    const id = setTimeout(() => setHint(false), 5000)
+    const id = setTimeout(() => setHint(false), 7000)
     return () => clearTimeout(id)
   }, [started])
 
-  // swap bowl voice when selection changes
   useEffect(() => {
     if (engineRef.current && started) engineRef.current.loadBowl(bowl.freq)
   }, [bowl.freq, started])
@@ -265,7 +320,7 @@ export default function Bowl() {
   useEffect(() => { engineRef.current?.setReverb(reverb) }, [reverb])
   useEffect(() => { engineRef.current?.setVolume(volume) }, [volume])
 
-  // Resize + DPR-aware canvas
+  // Resize + DPR-aware canvas (same formula as / and /motion)
   useEffect(() => {
     const cvs = canvasRef.current
     if (!cvs) return
@@ -280,9 +335,6 @@ export default function Bowl() {
       const s = stateRef.current
       s.cx = w / 2
       s.cy = h / 2
-      // On mobile/compact viewports, push the bowl up to at least 0.8 of the
-      // smaller viewport dimension. On desktop, preserve the original sizing
-      // (0.36 × min(canvas)) since the layout already looks right.
       const vMin = Math.min(window.innerWidth, window.innerHeight)
       const cMin = Math.min(w, h)
       const compact = vMin < 760
@@ -294,114 +346,26 @@ export default function Bowl() {
     return () => window.removeEventListener('resize', resize)
   }, [])
 
-  // Pointer handling
+  // Tap anywhere on the bowl strikes it as a transient — works with or
+  // without mic permission, so the route is usable on desktop too.
   useEffect(() => {
     const cvs = canvasRef.current
     if (!cvs) return
-
-    const localXY = (e: PointerEvent) => {
-      const rect = cvs.getBoundingClientRect()
-      return { x: e.clientX - rect.left, y: e.clientY - rect.top }
-    }
-
     const onDown = async (e: PointerEvent) => {
-      const { x, y } = localXY(e)
+      const rect = cvs.getBoundingClientRect()
+      const x = e.clientX - rect.left
+      const y = e.clientY - rect.top
       const s = stateRef.current
-      const dx = x - s.cx, dy = y - s.cy
-      const dist = Math.hypot(dx, dy)
-      const inner = s.radius * 0.55
-      const outer = s.radius * 1.05
-      cvs.setPointerCapture(e.pointerId)
-      await ensureStarted()
-      if (dist < inner) {
-        // Strike the bowl as an independent transient voice so prior
-        // strikes (other notes) keep ringing — enables chord-building.
-        engineRef.current?.strikeNote(bowl.freq, 0.6)
-        spawnRipple(x, y, true)
-        s.glowPulse = 1
-        return
-      }
-      if (dist <= outer) {
-        s.pointerActive = true
-        s.pointerOnRim = true
-        s.pointerX = x; s.pointerY = y
-        s.lastAngle = Math.atan2(dy, dx)
-        s.lastT = performance.now()
-        s.speed = 0
-      }
+      const dist = Math.hypot(x - s.cx, y - s.cy)
+      if (dist > s.radius * 1.1) return
+      if (!started) await ensureStarted()
+      engineRef.current?.strikeNote(bowl.freq, 0.6)
+      s.glowPulse = 1
+      s.ripples.push({ x: s.cx, y: s.cy, r: 12, alpha: 1, hue: s.hue })
     }
-
-    const onMove = (e: PointerEvent) => {
-      const { x, y } = localXY(e)
-      const s = stateRef.current
-      s.pointerX = x; s.pointerY = y
-      const dx = x - s.cx, dy = y - s.cy
-      const dist = Math.hypot(dx, dy)
-      const inner = s.radius * 0.55
-      const outer = s.radius * 1.15
-      const onRim = dist >= inner && dist <= outer
-      s.pointerOnRim = onRim
-
-      if (s.pointerActive && onRim) {
-        const angle = Math.atan2(dy, dx)
-        let d = angle - s.lastAngle
-        // wrap into -PI..PI
-        if (d > Math.PI) d -= Math.PI * 2
-        if (d < -Math.PI) d += Math.PI * 2
-        const now = performance.now()
-        const dt = Math.max(1, now - s.lastT)
-        const angVel = Math.abs(d) / (dt / 1000) // rad/s
-        // smooth speed
-        s.speed = s.speed * 0.7 + angVel * 0.3
-        s.lastAngle = angle
-        s.lastT = now
-        s.targetIntensity = Math.min(1, s.speed / 6)
-        // emit ripple at the touch point, modulated by speed
-        if (Math.random() < 0.25 + s.targetIntensity * 0.5) {
-          spawnRipple(x, y)
-        }
-        // trail
-        s.trails.push({ x, y, t: now })
-        if (s.trails.length > 60) s.trails.shift()
-      }
-    }
-
-    const onUp = (e: PointerEvent) => {
-      const s = stateRef.current
-      s.pointerActive = false
-      s.targetIntensity = 0
-      try { cvs.releasePointerCapture(e.pointerId) } catch {}
-    }
-
-    const onLeave = () => {
-      const s = stateRef.current
-      s.pointerOnRim = false
-    }
-
     cvs.addEventListener('pointerdown', onDown)
-    cvs.addEventListener('pointermove', onMove)
-    cvs.addEventListener('pointerup', onUp)
-    cvs.addEventListener('pointercancel', onUp)
-    cvs.addEventListener('pointerleave', onLeave)
-    return () => {
-      cvs.removeEventListener('pointerdown', onDown)
-      cvs.removeEventListener('pointermove', onMove)
-      cvs.removeEventListener('pointerup', onUp)
-      cvs.removeEventListener('pointercancel', onUp)
-      cvs.removeEventListener('pointerleave', onLeave)
-    }
-  }, [ensureStarted, bowl.freq])
-
-  const spawnRipple = (x: number, y: number, big = false) => {
-    const s = stateRef.current
-    s.ripples.push({
-      x, y,
-      r: big ? 12 : 4,
-      alpha: big ? 1 : 0.85,
-      hue: s.hue,
-    })
-    if (s.ripples.length > 60) s.ripples.shift()
-  }
+    return () => cvs.removeEventListener('pointerdown', onDown)
+  }, [ensureStarted, started, bowl.freq])
 
   // Animation + audio level loop
   useEffect(() => {
@@ -415,20 +379,35 @@ export default function Bowl() {
       last = now
       const s = stateRef.current
 
-      // Smooth intensity toward target
-      const decay = s.pointerActive ? 0.15 : 0.6
-      s.intensity += (s.targetIntensity - s.intensity) * Math.min(1, decay * (dt * 60) / 8)
+      // Read mic level if analyser is wired up.
+      const analyser = analyserRef.current
+      if (analyser && analyserBufRef.current) {
+        // Float32Array generic mismatch in TS 5.5+ lib.dom; the runtime
+        // type is correct, so cast it to satisfy the Web Audio overload.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        analyser.getFloatTimeDomainData(analyserBufRef.current as any)
+        let sum = 0
+        const buf = analyserBufRef.current
+        for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i]
+        const rms = Math.sqrt(sum / buf.length)
+        s.micRms = rms
+        s.level = s.level * 0.7 + rms * 0.3
+        // Map: 0.008 silent floor → 0.16 max. Tuned so quiet humming
+        // lifts the bowl audibly; loud breath fully opens it.
+        s.targetIntensity = Math.min(1, Math.max(0, (s.level - 0.008) / 0.155))
+      } else {
+        s.targetIntensity = 0
+      }
 
-      // Glow pulse decay
+      const decay = 0.5
+      s.intensity += (s.targetIntensity - s.intensity) * Math.min(1, decay * (dt * 60) / 8)
       s.glowPulse *= Math.pow(0.001, dt)
 
-      // Drive audio
       const v = engineRef.current?.voice
       if (v) {
-        // Combine sustained circling level with strike-driven level
         const base = v.currentLevel()
         const target = Math.max(base * 0.92 ** (dt * 12), s.intensity * 0.85)
-        if (s.pointerActive) v.setLevel(s.intensity * 0.85, 0.15)
+        if (s.intensity > 0.02) v.setLevel(s.intensity * 0.85, 0.15)
         else if (target < base) v.setLevel(target, 0.4)
       }
 
@@ -438,7 +417,6 @@ export default function Bowl() {
       const w = cvs.clientWidth, h = cvs.clientHeight
       ctx.clearRect(0, 0, w, h)
 
-      // Background ambient glow
       const bgGrad = ctx.createRadialGradient(s.cx, s.cy, s.radius * 0.2, s.cx, s.cy, s.radius * 3)
       const ambient = 0.18 + s.intensity * 0.18 + s.glowPulse * 0.12
       bgGrad.addColorStop(0, `hsla(${s.hue}, 60%, 35%, ${ambient})`)
@@ -446,7 +424,6 @@ export default function Bowl() {
       ctx.fillStyle = bgGrad
       ctx.fillRect(0, 0, w, h)
 
-      // Outer glow ring
       const glowR = s.radius * (1.05 + s.intensity * 0.06 + s.glowPulse * 0.08)
       const glow = ctx.createRadialGradient(s.cx, s.cy, s.radius * 0.7, s.cx, s.cy, glowR * 1.7)
       glow.addColorStop(0, `hsla(${s.hue}, 80%, 60%, 0)`)
@@ -457,7 +434,6 @@ export default function Bowl() {
       ctx.arc(s.cx, s.cy, glowR * 1.7, 0, Math.PI * 2)
       ctx.fill()
 
-      // Bowl body — metallic radial gradient
       const bodyGrad = ctx.createRadialGradient(
         s.cx - s.radius * 0.35, s.cy - s.radius * 0.45, s.radius * 0.1,
         s.cx, s.cy, s.radius
@@ -471,7 +447,6 @@ export default function Bowl() {
       ctx.fillStyle = bodyGrad
       ctx.fill()
 
-      // Inner well (darker recessed center) suggesting a bowl seen from above
       const wellR = s.radius * 0.78
       const well = ctx.createRadialGradient(s.cx, s.cy - s.radius * 0.05, wellR * 0.05, s.cx, s.cy, wellR)
       well.addColorStop(0, `hsla(${s.hue}, 60%, 8%, 1)`)
@@ -482,14 +457,12 @@ export default function Bowl() {
       ctx.fillStyle = well
       ctx.fill()
 
-      // Inner ripple-like rings inside the well, intensifying with sound
       ctx.save()
       ctx.beginPath()
       ctx.arc(s.cx, s.cy, wellR, 0, Math.PI * 2)
       ctx.clip()
-      const ringCount = 6
-      for (let i = 0; i < ringCount; i++) {
-        const phase = (now / 1400 + i / ringCount) % 1
+      for (let i = 0; i < 6; i++) {
+        const phase = (now / 1400 + i / 6) % 1
         const rr = phase * wellR
         const a = (1 - phase) * (0.05 + s.intensity * 0.35)
         ctx.beginPath()
@@ -500,21 +473,18 @@ export default function Bowl() {
       }
       ctx.restore()
 
-      // Rim highlight
       ctx.beginPath()
       ctx.arc(s.cx, s.cy, s.radius * 0.99, 0, Math.PI * 2)
       ctx.strokeStyle = `hsla(${s.hue}, 50%, 80%, 0.55)`
       ctx.lineWidth = 1.5
       ctx.stroke()
 
-      // Inner rim shadow
       ctx.beginPath()
       ctx.arc(s.cx, s.cy, s.radius * 0.78, 0, Math.PI * 2)
       ctx.strokeStyle = 'rgba(0,0,0,0.55)'
       ctx.lineWidth = 2
       ctx.stroke()
 
-      // Orbiting sparks on the rim
       const sparkR = s.radius * 0.88
       s.sparks.forEach((sp, i) => {
         sp.angle += dt * (0.05 + s.intensity * 0.6)
@@ -529,24 +499,6 @@ export default function Bowl() {
         ctx.fill()
       })
 
-      // Trail behind cursor on rim
-      if (s.trails.length > 1) {
-        ctx.lineCap = 'round'
-        for (let i = 1; i < s.trails.length; i++) {
-          const a = i / s.trails.length
-          const p0 = s.trails[i - 1]
-          const p1 = s.trails[i]
-          const age = (now - p1.t) / 600
-          if (age > 1) continue
-          ctx.strokeStyle = `hsla(${s.hue}, 90%, 80%, ${(1 - age) * a * 0.7})`
-          ctx.lineWidth = 1.5 + (1 - age) * 4 * s.intensity
-          ctx.beginPath()
-          ctx.moveTo(p0.x, p0.y)
-          ctx.lineTo(p1.x, p1.y)
-          ctx.stroke()
-        }
-      }
-
       // Ripples
       for (let i = s.ripples.length - 1; i >= 0; i--) {
         const r = s.ripples[i]
@@ -560,16 +512,18 @@ export default function Bowl() {
         ctx.stroke()
       }
 
-      // Mallet indicator
-      if (s.pointerOnRim) {
-        const mr = 10 + s.intensity * 10
-        const grad = ctx.createRadialGradient(s.pointerX, s.pointerY, 0, s.pointerX, s.pointerY, mr)
-        grad.addColorStop(0, `hsla(${s.hue}, 95%, 92%, ${0.7 + s.intensity * 0.3})`)
-        grad.addColorStop(1, `hsla(${s.hue}, 95%, 70%, 0)`)
-        ctx.fillStyle = grad
-        ctx.beginPath()
-        ctx.arc(s.pointerX, s.pointerY, mr, 0, Math.PI * 2)
-        ctx.fill()
+      // Mic level pill near the top of the canvas — gives users instant
+      // feedback that the bowl is "hearing" them.
+      if (s.micState === 'granted') {
+        const barW = Math.min(220, s.radius * 1.2)
+        const barH = 5
+        const barX = s.cx - barW / 2
+        const barY = 14
+        ctx.fillStyle = 'rgba(255,255,255,0.08)'
+        ctx.fillRect(barX, barY, barW, barH)
+        const fill = Math.max(0, Math.min(1, s.level / 0.18))
+        ctx.fillStyle = `hsla(${s.hue}, 80%, 70%, ${0.6 + fill * 0.4})`
+        ctx.fillRect(barX, barY, barW * fill, barH)
       }
 
       rafRef.current = requestAnimationFrame(tick)
@@ -581,32 +535,47 @@ export default function Bowl() {
 
   // Cleanup on unmount
   useEffect(() => () => {
+    try { streamRef.current?.getTracks().forEach(t => t.stop()) } catch {}
     engineRef.current?.stopAllTransients()
     engineRef.current?.voice?.stop()
   }, [])
 
-  // Keyboard: 1..7 picks low octave, Shift+1..7 picks high octave, space strikes.
+  // Keyboard: 1..7 low, Shift+1..7 high, Space strikes
   useEffect(() => {
     const onKey = async (e: KeyboardEvent) => {
       if (e.key >= '1' && e.key <= '7') {
         setBowlIdx(parseInt(e.key, 10) - 1)
       } else if (e.shiftKey && '!@#$%^&'.includes(e.key)) {
-        // Shift + 1..7 produces these symbols on a US keyboard layout.
         const idx = '!@#$%^&'.indexOf(e.key)
         if (idx >= 0) setBowlIdx(7 + idx)
       } else if (e.code === 'Space') {
         e.preventDefault()
-        await ensureStarted()
+        if (!started) await ensureStarted()
         engineRef.current?.strikeNote(bowl.freq, 0.6)
-        const s = stateRef.current
-        s.glowPulse = 1
+        stateRef.current.glowPulse = 1
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [ensureStarted, bowl.freq])
+  }, [ensureStarted, started, bowl.freq])
 
   const cssHue = useMemo(() => `hsl(${hue} 70% 65%)`, [hue])
+
+  const overlayCopy = (() => {
+    if (!started) {
+      return needsExplicitPermission
+        ? 'Tap to wake the bowl and allow mic access. Hum, sing, or blow gently to make it ring.'
+        : 'Tap to wake the bowl.'
+    }
+    return null
+  })()
+
+  const statusLine = (() => {
+    if (!started) return null
+    if (mic === 'granted') return null
+    if (mic === 'unavailable') return 'No microphone available — tap the bowl to strike.'
+    return null
+  })()
 
   return (
     <main className="bowl-main" style={styles.main}>
@@ -614,40 +583,16 @@ export default function Bowl() {
         <div className="bowl-titleBlock" style={styles.titleBlock}>
           <div style={styles.titleRow}>
             <BowlMark hue={hue} />
-            <div className="bowl-title" style={{ ...styles.title, color: cssHue }}>Singing Bowl</div>
+            <div className="bowl-title" style={{ ...styles.title, color: cssHue }}>Singing Bowl · Breath</div>
           </div>
-          <div className="bowl-subtitle" style={styles.subtitle}>{bowl.name} · {bowl.note} · {bowl.desc}</div>
+          <div className="bowl-subtitle" style={styles.subtitle}>
+            {bowl.name} · {bowl.note} · {bowl.desc}
+          </div>
         </div>
         <div className="bowl-headerControls" style={styles.headerControls}>
-          <a
-            href="/breath"
-            style={{
-              fontSize: 11,
-              letterSpacing: 0.5,
-              textTransform: 'uppercase',
-              color: 'rgba(255,255,255,0.55)',
-              textDecoration: 'none',
-              border: '1px solid rgba(255,255,255,0.1)',
-              padding: '6px 10px',
-              borderRadius: 999,
-              transition: 'color 0.2s ease, border-color 0.2s ease',
-            }}
-            aria-label="Switch to breath-controlled bowl"
-          >
-            🌬 Breath
-          </a>
-          <Knob
-            label="Reverb"
-            value={reverb}
-            onChange={setReverb}
-            hue={hue}
-          />
-          <Knob
-            label="Volume"
-            value={volume}
-            onChange={setVolume}
-            hue={hue}
-          />
+          <a href="/" style={styles.backLink} aria-label="Back to finger-controlled bowl">↺ Finger</a>
+          <Knob label="Reverb" value={reverb} onChange={setReverb} hue={hue} />
+          <Knob label="Volume" value={volume} onChange={setVolume} hue={hue} />
         </div>
       </header>
 
@@ -657,14 +602,27 @@ export default function Bowl() {
           <div style={styles.overlay} onPointerDown={ensureStarted}>
             <div style={styles.overlayInner}>
               <div style={{ ...styles.overlayTitle, color: cssHue }}>Begin</div>
-              <div style={styles.overlayText}>Tap or click anywhere on the bowl to awaken it.</div>
+              <div style={styles.overlayText}>{overlayCopy}</div>
             </div>
           </div>
         )}
-        {started && hint && (
+        {started && hint && mic === 'granted' && (
           <div className="bowl-hint" style={styles.hint}>
-            Trace the rim slowly. Tap the centre to strike.
+            Hum, sing, or blow softly. Tap the bowl to strike.
           </div>
+        )}
+        {statusLine && (
+          <div className="bowl-hint" style={styles.hint}>{statusLine}</div>
+        )}
+        {started && mic === 'denied' && needsExplicitPermission && (
+          <button
+            type="button"
+            className="bowl-motion-retry"
+            onPointerDown={retryMic}
+            style={styles.retryBtn}
+          >
+            Tap to allow microphone access
+          </button>
         )}
         <div style={styles.meter} aria-hidden>
           <div
@@ -682,15 +640,11 @@ export default function Bowl() {
           const active = i === bowlIdx
           return (
             <button
-              key={b.note}
+              key={b.note + i}
               className={`bowl-chip${active ? ' is-active' : ''}`}
               onClick={async () => {
                 setBowlIdx(i)
-                await ensureStarted()
-                // Strike the tapped chip's note as an independent transient
-                // so prior bells keep ringing — tap several chips to build a
-                // chord. The chip also becomes the selected (highlighted)
-                // bowl for the rim-tracing sustained voice.
+                if (!started) await ensureStarted()
                 engineRef.current?.strikeNote(b.freq, 0.55)
                 stateRef.current.glowPulse = 1
               }}
@@ -700,7 +654,6 @@ export default function Bowl() {
                 boxShadow: active
                   ? `0 0 24px hsla(${b.hue}, 80%, 55%, 0.55), inset 0 0 12px hsla(${b.hue}, 80%, 55%, 0.3)`
                   : '0 1px 0 rgba(255,255,255,0.04) inset',
-                // High-octave row reads as lighter / "brighter pitch".
                 background: i < 7
                   ? `radial-gradient(circle at 30% 25%, hsl(${b.hue} 50% 55%), hsl(${b.hue} 60% 18%))`
                   : `radial-gradient(circle at 30% 25%, hsl(${b.hue} 65% 75%), hsl(${b.hue} 70% 34%))`,
@@ -715,15 +668,10 @@ export default function Bowl() {
       </footer>
 
       <div className="bowl-hotkeys" style={styles.hotkeys}>
-        1–7 picks low row · Shift+1–7 picks high row · Space strikes · tap chips to layer chords
+        1–7 low row · Shift+1–7 high row · Space strikes · hum / blow for sustain
       </div>
 
       <style jsx global>{`
-        /* Without an explicit column template the grid column defaults to
-           'auto' and expands to fit the widest child — on a 390 px iPhone
-           that's the header, which pushes both the canvas and the chip row
-           wider than the viewport. Pin the column to 100% and let the grid
-           items shrink. */
         .bowl-main { grid-template-columns: minmax(0, 1fr); }
         .bowl-header,
         .bowl-stage,
@@ -731,26 +679,21 @@ export default function Bowl() {
         .bowl-headerControls,
         .bowl-titleBlock { min-width: 0; }
 
-        /* Mobile portrait: keep all 7 chips on a single row by sizing them
-           with clamp(40px, 11vw, 56px) and using nowrap so they don't fall
-           to a second row. The 40 px floor preserves the touch target. */
         @media (orientation: portrait) and (max-width: 760px) {
           .bowl-header {
             padding: 12px 14px 6px !important;
             flex-wrap: wrap;
             gap: 8px;
           }
-          .bowl-title { font-size: 22px !important; }
+          .bowl-title { font-size: 20px !important; }
           .bowl-subtitle { font-size: 11px !important; }
-          .bowl-headerControls { gap: 12px !important; }
+          .bowl-headerControls { gap: 10px !important; }
           .bowl-headerControls .knob-label { display: none !important; }
-          .bowl-headerControls input[type='range'] { width: 80px !important; }
+          .bowl-headerControls input[type='range'] { width: 76px !important; }
           .bowl-footer {
             padding: 6px 6px 14px !important;
             gap: clamp(2px, 0.8vw, 6px) !important;
             justify-content: center !important;
-            /* 7-column grid fills row-by-row, so the 14 chips become a
-               clean two-row keyboard (low octave on top, high below). */
             grid-template-columns: repeat(7, auto) !important;
           }
           .bowl-chip {
@@ -762,8 +705,6 @@ export default function Bowl() {
           .bowl-hotkeys { display: none !important; }
           .bowl-hint { bottom: 14px !important; font-size: 11px !important; }
         }
-        /* Mobile landscape: stage on the left, chips stacked vertically
-           on the right. Same minmax guard on the stage column. */
         @media (orientation: landscape) and (max-height: 500px) {
           .bowl-main {
             grid-template-rows: auto 1fr !important;
@@ -776,17 +717,14 @@ export default function Bowl() {
             flex-wrap: wrap;
             gap: 8px;
           }
-          .bowl-title { font-size: 18px !important; }
+          .bowl-title { font-size: 16px !important; }
           .bowl-subtitle { font-size: 10px !important; }
-          .bowl-headerControls { gap: 12px !important; }
+          .bowl-headerControls { gap: 10px !important; }
           .bowl-headerControls .knob-label { display: none !important; }
           .bowl-headerControls input[type='range'] { width: 72px !important; }
           .bowl-stage { grid-area: stage; }
           .bowl-footer {
             grid-area: footer;
-            /* Two columns of 7: low octave column on the left of the
-               rail, high octave on the right. grid-auto-flow:column
-               fills the first column top-to-bottom first. */
             grid-template-columns: auto auto !important;
             grid-template-rows: repeat(7, auto) !important;
             grid-auto-flow: column !important;
@@ -853,10 +791,7 @@ function Knob({
         step={0.01}
         value={value}
         onChange={e => onChange(parseFloat(e.target.value))}
-        style={{
-          ...styles.range,
-          accentColor: `hsl(${hue} 70% 65%)`,
-        }}
+        style={{ ...styles.range, accentColor: `hsl(${hue} 70% 65%)` }}
       />
       <span className="knob-value" style={styles.knobValue}>{Math.round(value * 100)}</span>
     </label>
@@ -902,6 +837,17 @@ const styles: Record<string, React.CSSProperties> = {
     gap: 18,
     alignItems: 'center',
   },
+  backLink: {
+    fontSize: 11,
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+    color: 'rgba(255,255,255,0.55)',
+    textDecoration: 'none',
+    border: '1px solid rgba(255,255,255,0.1)',
+    padding: '6px 10px',
+    borderRadius: 999,
+    transition: 'color 0.2s ease, border-color 0.2s ease',
+  },
   stage: {
     position: 'relative',
     minHeight: 0,
@@ -912,7 +858,7 @@ const styles: Record<string, React.CSSProperties> = {
     inset: 0,
     width: '100%',
     height: '100%',
-    cursor: 'crosshair',
+    cursor: 'pointer',
   },
   overlay: {
     position: 'absolute',
@@ -929,13 +875,14 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid rgba(255,255,255,0.08)',
     borderRadius: 14,
     background: 'rgba(20,22,33,0.55)',
+    maxWidth: 340,
   },
   overlayTitle: {
     fontFamily: 'var(--serif, Georgia, serif)',
     fontSize: 32,
     marginBottom: 8,
   },
-  overlayText: { fontSize: 13, color: 'var(--t2, #9399a8)' },
+  overlayText: { fontSize: 13, color: 'var(--t2, #9399a8)', lineHeight: 1.5 },
   hint: {
     position: 'absolute',
     left: 0, right: 0, bottom: 18,
@@ -962,9 +909,6 @@ const styles: Record<string, React.CSSProperties> = {
     transition: 'width 80ms linear',
   },
   footer: {
-    // Grid keeps the chips in exactly two rows of 7 (low octave on top,
-    // high octave below) at every viewport. Mobile-landscape CSS flips
-    // this to two columns of 7 on the side.
     display: 'grid',
     gridTemplateColumns: 'repeat(7, auto)',
     justifyContent: 'center',
@@ -1016,6 +960,23 @@ const styles: Record<string, React.CSSProperties> = {
     width: 26,
     textAlign: 'right',
     color: 'var(--t1, #e4e5ea)',
+  },
+  retryBtn: {
+    position: 'absolute',
+    left: '50%',
+    transform: 'translateX(-50%)',
+    bottom: 36,
+    padding: '10px 18px',
+    borderRadius: 999,
+    border: '1px solid rgba(216, 178, 96, 0.55)',
+    background: 'rgba(20, 22, 33, 0.65)',
+    color: '#d8b260',
+    fontSize: 12,
+    letterSpacing: 0.4,
+    cursor: 'pointer',
+    backdropFilter: 'blur(8px)',
+    WebkitBackdropFilter: 'blur(8px)',
+    pointerEvents: 'auto',
   },
   hotkeys: {
     position: 'absolute',
