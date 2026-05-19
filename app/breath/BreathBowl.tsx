@@ -114,14 +114,11 @@ class BowlEngine {
   private static MAX_TRANSIENTS = 8
 
   constructor() {
-    // iOS speaker fix; will be overridden to 'play-and-record' once the
-    // mic stream is granted.
-    try {
-      const ns: any = (typeof navigator !== 'undefined') ? (navigator as any) : null
-      if (ns && ns.audioSession && typeof ns.audioSession === 'object') {
-        ns.audioSession.type = 'playback'
-      }
-    } catch {}
+    // Deliberately do NOT set navigator.audioSession.type='playback' here:
+    // that tells iOS the page is output-only, and any subsequent
+    // getUserMedia() call gets silently denied. We leave the session at
+    // its default ('auto') until the mic is granted, then flip it to
+    // 'play-and-record' in attachMicResult.
     const Ctor: typeof AudioContext =
       (window as any).AudioContext || (window as any).webkitAudioContext
     this.ctx = new Ctor()
@@ -573,7 +570,9 @@ export default function BreathBowl() {
   const statusLine = (() => {
     if (!started) return null
     if (mic === 'granted') return null
-    if (mic === 'unavailable') return 'No microphone available — tap the bowl to strike.'
+    if (mic === 'unavailable') return 'No microphone API on this browser — tap the bowl to strike.'
+    if (mic === 'denied') return 'Microphone access blocked — tap the pill below to retry.'
+    if (mic === 'idle') return 'Mic request still pending… if no iOS prompt appeared, tap the pill below.'
     return null
   })()
 
@@ -614,7 +613,7 @@ export default function BreathBowl() {
         {statusLine && (
           <div className="bowl-hint" style={styles.hint}>{statusLine}</div>
         )}
-        {started && mic === 'denied' && needsExplicitPermission && (
+        {started && (mic === 'denied' || mic === 'idle') && needsExplicitPermission && (
           <button
             type="button"
             className="bowl-motion-retry"
